@@ -1,17 +1,32 @@
 # Payment Fraud Detection Engine
 
 A real-time payment fraud detection engine built from scratch: event ingestion, streaming
-feature computation, an explainable rules engine and an ML risk scorer, aiming to return
-`ALLOW` / `REVIEW` / `DENY` for every payment in under 100 ms.
-
-> **Status:** Milestones 1–6 of 7 complete — ingestion, a labelled synthetic traffic
-> generator, a streaming feature engine, explainable rules, a calibrated ML risk scorer with
-> SHAP explanations, a reconstructable audit log, and an analyst dashboard whose verdicts
-> feed model retraining. See the [roadmap](#roadmap).
-
-![Case view: why an event was flagged, model risk with SHAP contributions, the user's history and the verdict buttons](docs/images/case.png)
+feature computation, explainable rules, a calibrated ML risk scorer with SHAP explanations,
+an audit log every decision can be re-derived from, and an analyst dashboard whose verdicts
+retrain the model. It returns `ALLOW`, `REVIEW` or `DENY` for each payment in about 3 ms.
 
 ![CI](https://github.com/ADARSHputhane/fraud-detection-engine/actions/workflows/ci.yml/badge.svg)
+
+![Triage in the review dashboard: open the riskiest case, read why it was flagged, press F or L, and the next case opens](docs/images/demo.gif)
+
+## Results at a glance
+
+| | Result | Target |
+|---|---|---|
+| Fraud flagged on held-out data (model) | **90.2%** at a **0.01%** false-positive rate, AUC 0.984 | AUC ≥ 0.90 |
+| Fraud flagged by the rules alone (all data) | **90.9%** at a **0.17%** false-positive rate | ≥ 80% at < 2% |
+| Decision time, steady 100 events/s | **3.2 ms** p95, publish to decision | < 100 ms |
+| Throughput, one worker | **730** decisions/s | ≥ 100/s |
+| Feature computation · model scoring with SHAP | **4.9 ms** · **0.33 ms** p95 | < 10 ms · < 30 ms |
+| Decisions re-derived from the audit log | **33,000 of 33,000** identical | all |
+| Analyst triage | keyboard-only; 8.7 ms of system time per case | < 30 s per case |
+
+Measured on synthetic data (500 customers, 30 days, 35,421 events, 5% fraud), which is
+cleaner than real traffic: treat the detection numbers as an upper bound.
+
+**Read more:** [the write-up](docs/writeup.md) ·
+[every signal and why it exists](docs/signals.md) ·
+[an example model comparison report](docs/example-model-comparison.md)
 
 ## Why I'm building this
 
@@ -35,14 +50,9 @@ flowchart LR
     D --> AUD[(Audit log)]
     AUD --> DASH[Analyst dashboard]
     DASH -->|labels| ML
-
-    classDef done fill:#d1fae5,stroke:#059669,color:#064e3b;
-    class API,PG,RS,FE,RE,ML,D,AUD,DASH done;
 ```
 
-Green = built.
-
-## Milestone 1 results
+## Ingestion
 
 Measured on a single development machine against real PostgreSQL and Redis:
 
@@ -51,9 +61,9 @@ Measured on a single development machine against real PostgreSQL and Redis:
 | 10,000-event replay (batches of 500) | 10,000 accepted, **0 validation errors**, ~4,100 events/s |
 | Single-event ingest latency | **3.9 ms p50 · 5.5 ms p95** |
 | Re-sending the same events | All detected as duplicates, nothing published twice |
-| Test suite | 58 tests, runs in ~1 s without Docker |
+| Test suite | 158 Python tests in ~12 s without Docker; dashboard lint, type-check and build in CI |
 
-## Milestone 2 results
+## Streaming features
 
 A worker reads `events:incoming` through a Redis consumer group and computes 35 signals per
 event: velocity counters, per-user spending baselines, geo and network checks, and card
@@ -61,8 +71,7 @@ history.
 
 | Check | Result |
 |---|---|
-| Feature computation, all 35,961 events of a 30-day dataset, real Redis | **2.0 ms p50 · 4.7 ms p95** (target < 10 ms) |
-| Worker throughput, 10,000 events end to end into Postgres | ~420 events/s, one worker |
+| Feature computation, all 35,421 events of a 30-day dataset, real Redis | **2.5 ms p50 · 4.9 ms p95** (target < 10 ms); 0.7 ms p50 inside the Docker network |
 | Replay of the same events on fresh state | Identical vectors (windows use event time, not wall clock) |
 | Worker crash before acknowledging | Entries stay pending and are reprocessed; no double counting |
 
@@ -81,7 +90,9 @@ How it works:
   absolute time gap with a one-minute floor, first-seen times only ever move earlier, and a
   card's age can't go negative.
 
-## Milestone 3 results
+All 35 signals, with the reasoning behind each: [docs/signals.md](docs/signals.md).
+
+## Explainable rules
 
 Rules live in [`default_rules.yml`](src/fraud_engine/rules/default_rules.yml): readable by
 an analyst, hot-reloaded when the file changes, and every hit carries a sentence explaining
@@ -119,7 +130,7 @@ Safety: conditions are parsed with Python's `ast` and checked against an allow-l
 (comparisons, `and`/`or`/`not`, feature names, literals); nothing reaches `eval()`. Unknown
 feature names fail at load time, and a broken edit leaves the last good ruleset running.
 
-## Milestone 4 results
+## ML risk scoring
 
 An XGBoost classifier scores every event 0–100, with the five features that pushed the score
 most (exact TreeSHAP values). Trained on the oldest 60% of events, calibrated on the next 20%,
@@ -146,8 +157,10 @@ would be deployed.
   events scored 5–20 averaged 8.4 and were 9.4% fraud; events scored 90+ averaged 99.4 and
   were all fraud. The middle of the range holds too few events (2–7 per band) to verify, a
   consequence of how cleanly the model separates the classes.
-- **Where the model beats the rules:** account takeovers on the victim's own device
-  (83% vs 76%), which no device or location rule can see.
+- **Where the model beats the rules:** account takeovers, 83% vs 69% on the same held-out
+  events (a small sample: 42), most of them on the victim's own device, which no device or
+  location rule can see. 23 of the 316 test fraud events are friendly fraud, which nothing
+  can catch, so the ceiling is about 92.7%.
 - **Explanations:** XGBoost's built-in TreeSHAP (`pred_contribs=True`), exact and additive
   (contributions + bias = the model's output, checked in the tests), without pulling in the
   `shap` package.
@@ -155,7 +168,7 @@ would be deployed.
   pickle for the main model. Versions live side by side in `models/`; `CURRENT` names the
   active one and running services swap to a newly promoted version without a restart.
 
-## Milestone 5 results
+## Decisions and the audit log
 
 The full stack running in Docker (API and worker containers built from the `Dockerfile`):
 
@@ -189,10 +202,12 @@ model version in use. The API serves `/metrics`; the worker serves `:9100/metric
 `docker compose --profile monitoring up -d` adds a Prometheus server on
 [localhost:9090](http://localhost:9090).
 
-## Milestone 6 results
+## Analyst dashboard and feedback loop
 
 A Next.js review dashboard on [localhost:3000](http://localhost:3000), and a feedback loop
 from analyst verdicts back into the model.
+
+![Case view: why an event was flagged, model risk with SHAP contributions, the user's history and the verdict buttons](docs/images/case.png)
 
 **Triage in under 30 seconds** is a design target, so the case view is built around it:
 
@@ -289,13 +304,17 @@ The output is deterministic for a given `--seed`.
 
 ```bash
 docker compose up -d --build              # Postgres, Redis, API :8000, worker, dashboard :3000
-pip install -e .                          # installs the fraud-gen CLI
+pip install -e .                          # installs the fraud-gen and fraud-engine CLIs
 fraud-gen generate --users 500 --days 30 --out data/
-fraud-gen replay --file data/events.jsonl --limit 10000
 
-# Train a model (no services needed: features are computed with the live engine code)
+# Train a model. Features are computed by the same engine code the worker runs, in Redis
+# under a throwaway key prefix, so training sees exactly what production sees.
 fraud-engine build-features --events data/events.jsonl --out data/features.jsonl
 fraud-engine train --promote              # the running worker picks it up within seconds
+
+# Score traffic, then watch attacks get caught live
+fraud-gen replay --file data/events.jsonl --limit 10000
+fraud-gen demo --scenario all             # or card_testing, impossible_travel, ...
 
 # Check the engine
 fraud-engine latency-report               # throughput and latency from the audit log
@@ -349,6 +368,32 @@ curl -X POST localhost:8000/events/payment -H 'content-type: application/json' -
 # → 202 {"event_id": "...", "stream_id": "1729416600000-0", "status": "accepted"}
 ```
 
+## Live demo
+
+`fraud-gen demo` gives a few customers three weeks of normal history, then replays an attack
+against the running engine one event at a time and prints each decision next to the truth:
+
+```text
+IMPOSSIBLE TRAVEL
+The cardholder pays at home; minutes later a cloned copy of the card is swiped abroad
+
+  20 Oct 10:09  genuine  ALLOW    0  INR     429.36 fuel, Mumbai
+  20 Oct 11:19  fraud    DENY    98  INR  11,087.27 fashion, Kyiv
+                               R002+R009: Card used 5093 km from its last payment, at 4379 km/h, ...
+
+ACCOUNT TAKEOVER
+Stolen credentials drain the victim's existing card through transfers and gift cards
+
+  20 Oct 03:46  fraud    ALLOW    1  INR  10,588.46 gift_cards, Pune
+  20 Oct 03:53  fraud    ALLOW   37  INR  10,925.28 money_transfer, Pune
+  20 Oct 03:57  fraud    DENY    82  INR   3,221.67 gift_cards, Pune
+
+Flagged 30 of 32 fraudulent events, 0 genuine event(s) flagged.
+```
+
+The account takeover is the honest hard case: it runs on the victim's own phone and home
+connection, so nothing looks wrong until the pattern of transfers builds up.
+
 ## Roadmap
 
 - [x] **1. Event ingestion & schema** — FastAPI, Postgres, Redis Streams, synthetic generator
@@ -358,7 +403,12 @@ curl -X POST localhost:8000/events/payment -H 'content-type: application/json' -
 - [x] **4. ML risk scorer** — XGBoost + Isolation Forest, SHAP explanations
 - [x] **5. Decision service & audit log** — <100 ms end to end, Prometheus metrics
 - [x] **6. Analyst dashboard** — Next.js review queue with a label feedback loop
-- [ ] **7. Write-up & demo**
+- [x] **7. Write-up & demo** — [write-up](docs/writeup.md), [signals](docs/signals.md),
+      demo GIF, `fraud-gen demo`
+
+Next: the IEEE-CIS dataset for real-world messiness, graph signals (devices and cards
+shared between accounts), sharding the stream by user beyond one worker, API keys and rate
+limiting on ingest, and shadow mode for new rules and models.
 
 ## Project layout
 
@@ -383,9 +433,10 @@ src/fraud_engine/
   cli.py          fraud-engine worker | bench-features | build-features | evaluate-rules |
                   load-labels | train | retrain | audit | latency-report
   main.py         app factory
-  generator/      personas, fraud patterns, CLI
+  generator/      personas, fraud patterns, live demo, CLI
 tests/            schema, API, generator, feature, worker, rules, ML, audit and review tests
 dashboard/        Next.js 14 review dashboard (queue, case view, stats)
+docs/             write-up, signal reference, example model comparison, screenshots
 ```
 
 ## Tech

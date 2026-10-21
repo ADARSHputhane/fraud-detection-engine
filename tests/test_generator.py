@@ -163,3 +163,23 @@ def test_cli_generate_writes_files(tmp_path):
     labels = (out / "labels.jsonl").read_text().splitlines()
     assert len(events) == len(labels) > 0
     assert json.loads((out / "stats.json").read_text())["events"] == len(events)
+
+
+def test_demo_world_and_formatting():
+    import random
+
+    from fraud_engine.generator.demo import ATTACK_WINDOW, build_world, describe, why
+
+    now = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    personas, history = build_world(random.Random(1), users=5, now=now)
+    times = [datetime.fromisoformat(e["timestamp"]) for e in history]
+    assert len(personas) == 5 and history
+    assert times == sorted(times) and max(times) < now - ATTACK_WINDOW
+
+    payment = next(e for e in history if e["event_type"] == "payment")
+    assert payment["merchant_category"] in describe(payment)
+    rule = {"id": "R002", "action": "DENY", "weight": 90, "reason": "far away"}
+    assert why({"rules_fired": [rule], "shap_top5": None}) == "R002: far away"
+    shap = [{"feature": "new_device", "contribution": 2.0}]
+    assert "new_device" in why({"rules_fired": [], "shap_top5": shap})
+    assert why({"rules_fired": [], "shap_top5": []}) == ""

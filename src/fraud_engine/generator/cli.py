@@ -2,6 +2,7 @@
 
 fraud-gen generate --users 500 --days 30 --out data/
 fraud-gen replay --file data/events.jsonl --url http://localhost:8000
+fraud-gen demo --scenario impossible_travel      # live attack against the running engine
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 import httpx
 
 from ..jsonl import read_jsonl, write_jsonl
+from .patterns import PATTERNS
 from .simulate import generate_dataset
 
 
@@ -110,6 +112,20 @@ def cmd_replay(args: argparse.Namespace) -> int:
     return 0 if failed == 0 else 1
 
 
+def cmd_demo(args: argparse.Namespace) -> int:
+    from .demo import run
+
+    scenarios = list(PATTERNS) if args.scenario == "all" else [args.scenario]
+    return run(
+        args.url,
+        scenarios,
+        users=args.users,
+        seed=args.seed,
+        delay=args.delay,
+        color=sys.stdout.isatty() and not args.no_color,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="fraud-gen", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -135,6 +151,15 @@ def main(argv: list[str] | None = None) -> int:
         "--rate", type=float, default=0, help="events per second, one request each (paced)"
     )
     rep.set_defaults(func=cmd_replay)
+
+    demo = sub.add_parser("demo", help="replay an attack live and print each decision")
+    demo.add_argument("--scenario", choices=[*PATTERNS, "all"], default="all")
+    demo.add_argument("--url", default="http://localhost:8000")
+    demo.add_argument("--users", type=int, default=25)
+    demo.add_argument("--seed", type=int, default=None, help="random by default, so reruns differ")
+    demo.add_argument("--delay", type=float, default=0.6, help="seconds between attack events")
+    demo.add_argument("--no-color", action="store_true")
+    demo.set_defaults(func=cmd_demo)
 
     args = parser.parse_args(argv)
     return args.func(args)

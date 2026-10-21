@@ -173,7 +173,7 @@ export default async function CasePage({ params }: { params: { id: string } }) {
 
           <details className="rounded-xl border border-hair bg-surface p-5">
             <summary className="cursor-pointer text-sm font-semibold text-ink">
-              All {features.length} signals
+              All {Object.values(grouped).flat().length} signals
             </summary>
             <div className="mt-3 grid gap-5 md:grid-cols-2">
               {Object.entries(grouped).map(([group, items]) => (
