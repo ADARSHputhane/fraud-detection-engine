@@ -10,7 +10,8 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Index, String, Uuid, func, select
+from sqlalchemy import JSON, DateTime, Index, Insert, Integer, String, Uuid, func, select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -51,6 +52,19 @@ class EventRecord(Base):
     )
 
 
+class FeatureRecord(Base):
+    """The feature vector computed for an event — what the rules and the model saw."""
+
+    __tablename__ = "features"
+
+    event_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    feature_version: Mapped[int] = mapped_column(Integer)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    vector: Mapped[dict] = mapped_column(JSONPayload)
+
+
 class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True)
@@ -60,6 +74,12 @@ class Database:
         # Fine for Milestone 1. Switch to Alembic migrations once the schema starts changing.
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+
+    def insert_ignore(self, model: type[Base], rows: list[dict]) -> Insert:
+        """INSERT ... ON CONFLICT DO NOTHING, so a retried batch doesn't fail on rows it
+        already wrote."""
+        dialect = postgresql if self.engine.dialect.name == "postgresql" else sqlite
+        return dialect.insert(model).values(rows).on_conflict_do_nothing()
 
     async def session(self) -> AsyncIterator[AsyncSession]:
         async with self.sessionmaker() as session:

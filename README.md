@@ -4,8 +4,8 @@ A real-time payment fraud detection engine built from scratch: event ingestion, 
 feature computation, an explainable rules engine and an ML risk scorer, aiming to return
 `ALLOW` / `REVIEW` / `DENY` for every payment in under 100 ms.
 
-> **Status:** Milestone 1 of 7 complete — event ingestion, schemas and a labelled synthetic
-> traffic generator. See the [roadmap](#roadmap).
+> **Status:** Milestones 1–2 of 7 complete — event ingestion, a labelled synthetic traffic
+> generator, and a streaming feature engine. See the [roadmap](#roadmap).
 
 ![CI](https://github.com/ADARSHputhane/fraud-detection-engine/actions/workflows/ci.yml/badge.svg)
 
@@ -33,7 +33,7 @@ flowchart LR
     DASH -->|labels| ML
 
     classDef done fill:#d1fae5,stroke:#059669,color:#064e3b;
-    class API,PG,RS done;
+    class API,PG,RS,FE done;
 ```
 
 Green = built. The rest is on the roadmap below.
@@ -48,6 +48,34 @@ Measured on a single development machine against real PostgreSQL and Redis:
 | Single-event ingest latency | **3.9 ms p50 · 5.5 ms p95** |
 | Re-sending the same events | All detected as duplicates, nothing published twice |
 | Test suite | 58 tests, runs in ~1 s without Docker |
+
+## Milestone 2 results
+
+A worker reads `events:incoming` through a Redis consumer group and computes 35 signals per
+event: velocity counters, per-user spending baselines, geo and network checks, and card
+history.
+
+| Check | Result |
+|---|---|
+| Feature computation, all 35,961 events of a 30-day dataset, real Redis | **2.0 ms p50 · 4.7 ms p95** (target < 10 ms) |
+| Worker throughput, 10,000 events end to end into Postgres | ~420 events/s, one worker |
+| Replay of the same events on fresh state | Identical vectors (windows use event time, not wall clock) |
+| Worker crash before acknowledging | Entries stay pending and are reprocessed; no double counting |
+
+How it works:
+
+- **Velocity windows are Redis sorted sets scored by event time.** "Payments on this card
+  in the last 5 minutes" is a `ZCOUNT` over `[t − 300 s, t]`, where `t` is the event's own
+  timestamp. Replaying last month's data gives the same answers it would have given live.
+- **Two pipelined round trips per event.** The first records the event in the velocity sets
+  and reads prior state; the second folds the event into the user's baselines. Baselines are
+  read *before* the update, so an amount is compared with history that doesn't include it.
+- **Idempotent.** Set members are event or card ids, and each computed vector is cached
+  under the event id, so a redelivered event returns the same vector without being counted
+  twice.
+- **Out-of-order and skewed clocks are handled explicitly:** impossible travel uses the
+  absolute time gap with a one-minute floor, first-seen times only ever move earlier, and a
+  card's age can't go negative.
 
 ## Design decisions
 
@@ -92,7 +120,7 @@ The output is deterministic for a given `--seed`.
 **With Docker:**
 
 ```bash
-docker compose up -d --build              # Postgres + Redis + API on :8000
+docker compose up -d --build              # Postgres + Redis + API on :8000 + worker
 pip install -e .                          # installs the fraud-gen CLI
 fraud-gen generate --users 500 --days 30 --out data/
 fraud-gen replay --file data/events.jsonl --limit 10000
@@ -115,6 +143,7 @@ pytest
 | `POST` | `/events/instrument` | Ingest a card added / updated / removed |
 | `POST` | `/events/batch` | Up to 1,000 mixed events, order preserved |
 | `GET` | `/events/{event_id}` | Fetch a stored event |
+| `GET` | `/features/{event_id}` | The feature vector the worker computed for an event |
 | `GET` | `/health` | Postgres and Redis status |
 
 ```bash
@@ -131,7 +160,7 @@ curl -X POST localhost:8000/events/payment -H 'content-type: application/json' -
 ## Roadmap
 
 - [x] **1. Event ingestion & schema** — FastAPI, Postgres, Redis Streams, synthetic generator
-- [ ] **2. Feature engine** — velocity counters (Redis sorted sets), amount z-scores,
+- [x] **2. Feature engine** — velocity counters (Redis sorted sets), amount z-scores,
       impossible travel, IP/BIN country mismatch, card age
 - [ ] **3. Rules engine** — YAML rules with human-readable reasons
 - [ ] **4. ML risk scorer** — XGBoost + Isolation Forest, SHAP explanations
@@ -145,11 +174,16 @@ curl -X POST localhost:8000/events/payment -H 'content-type: application/json' -
 src/fraud_engine/
   schemas.py      event contracts + card-number detection
   api.py          ingest routes
-  db.py           Postgres events table
-  stream.py       Redis Streams publisher
+  scoring_api.py  read-side routes (features)
+  db.py           Postgres tables
+  stream.py       Redis Streams publisher and consumer-group reader
+  features/       feature catalogue, Redis feature engine, geo, IP/BIN reference data
+  pipeline.py     per-event stages, timed
+  worker.py       stream worker: batch, process in order, persist, acknowledge
+  cli.py          fraud-engine worker | bench-features
   main.py         app factory
   generator/      personas, fraud patterns, CLI
-tests/            schema, API and generator tests
+tests/            schema, API, generator, feature and worker tests
 ```
 
 ## Tech

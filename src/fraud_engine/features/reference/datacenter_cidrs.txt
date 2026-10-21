@@ -1,0 +1,16 @@
+# Cloud and hosting provider IP ranges, one CIDR per line.
+#
+# These are coarse approximations of large provider allocations, matching what the synthetic
+# generator emits. For production, load a maintained list instead, e.g. an IP-to-ASN database
+# filtered to hosting ASNs, or a community VPN/datacenter list, refreshed daily.
+
+3.0.0.0/8         # Amazon Web Services
+13.0.0.0/8        # mostly AWS and Microsoft Azure
+18.0.0.0/8        # AWS (large blocks)
+34.0.0.0/8        # Google Cloud
+35.0.0.0/8        # Google Cloud
+52.0.0.0/8        # AWS and Microsoft Azure
+54.0.0.0/8        # Amazon Web Services
+104.131.0.0/16    # DigitalOcean
+159.65.0.0/16     # DigitalOcean
+167.99.0.0/16     # DigitalOcean

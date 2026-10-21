@@ -1,5 +1,7 @@
+import socket
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +17,16 @@ class Settings(BaseSettings):
     stream_maxlen: int = 100_000
     # Largest batch accepted by POST /events/batch.
     max_batch_size: int = 1_000
+
+    # Worker: consumer-group name shared by all workers, and this worker's own name.
+    consumer_group: str = "scorers"
+    consumer_name: str = Field(default_factory=socket.gethostname)
+    worker_batch_size: int = 100
+    worker_block_ms: int = 1_000
+    # Events that fail processing are parked here instead of blocking the stream.
+    deadletter_stream: str = "events:deadletter"
+    # Prefix for the feature engine's Redis keys.
+    feature_prefix: str = "fe"
 
 
 @lru_cache

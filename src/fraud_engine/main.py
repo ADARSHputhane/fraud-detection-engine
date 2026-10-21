@@ -17,6 +17,7 @@ from . import __version__
 from .api import router
 from .config import Settings, get_settings
 from .db import Database
+from .scoring_api import router as scoring_router
 from .stream import EventStream
 
 
@@ -63,6 +64,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
     )
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.include_router(router)
+    app.include_router(scoring_router)
     return app
 
 

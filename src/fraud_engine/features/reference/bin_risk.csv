@@ -1,0 +1,8 @@
+# BIN (first 6-8 card digits) risk table. Longest matching prefix wins; BINs not listed fall
+# back to a default for the card type (prepaid 0.6, credit 0.25, debit 0.2).
+#
+# The entries below are illustrative. In production this table is built from a BIN
+# intelligence feed plus your own chargeback rate per BIN, and refreshed regularly.
+prefix,risk,note
+000000,0.95,test BIN that should never appear in live traffic
+999999,0.95,test BIN that should never appear in live traffic

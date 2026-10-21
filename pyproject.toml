@@ -32,9 +32,13 @@ dev = [
 
 [project.scripts]
 fraud-gen = "fraud_engine.generator.cli:main"
+fraud-engine = "fraud_engine.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+fraud_engine = ["features/reference/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

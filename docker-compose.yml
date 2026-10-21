@@ -27,16 +27,24 @@ services:
 
   api:
     build: .
-    environment:
+    environment: &app-env
       DATABASE_URL: postgresql+psycopg://fraud:fraud@postgres:5432/fraud
       REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
-    depends_on:
+    depends_on: &app-deps
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  # Consumes events:incoming and computes features (and, later, the decision) per event.
+  worker:
+    build: .
+    command: ["fraud-engine", "worker"]
+    environment: *app-env
+    depends_on: *app-deps
+    restart: unless-stopped
 
 volumes:
   pgdata:

@@ -15,18 +15,8 @@ from pathlib import Path
 
 import httpx
 
+from ..jsonl import read_jsonl, write_jsonl
 from .simulate import generate_dataset
-
-
-def _write_jsonl(path: Path, rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, separators=(",", ":")) + "\n")
-
-
-def _read_jsonl(path: Path) -> list[dict]:
-    with path.open(encoding="utf-8") as fh:
-        return [json.loads(line) for line in fh if line.strip()]
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
@@ -35,8 +25,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
     )
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    _write_jsonl(out / "events.jsonl", ds.events)
-    _write_jsonl(out / "labels.jsonl", ds.labels)
+    write_jsonl(out / "events.jsonl", ds.events)
+    write_jsonl(out / "labels.jsonl", ds.labels)
     (out / "stats.json").write_text(json.dumps(ds.stats, indent=2))
     print(json.dumps(ds.stats, indent=2))
     print(f"\nWrote {len(ds.events):,} events to {out / 'events.jsonl'}")
@@ -52,7 +42,7 @@ def _summarise_errors(resp: httpx.Response) -> str:
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    events = _read_jsonl(Path(args.file))
+    events = read_jsonl(Path(args.file))
     if args.limit:
         events = events[: args.limit]
     accepted = duplicates = failed = 0

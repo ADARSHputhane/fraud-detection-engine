@@ -11,7 +11,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import (
@@ -192,3 +192,10 @@ class StoredEvent(BaseModel):
     event_type: str
     received_at: datetime
     payload: dict
+
+
+class StoredFeatures(BaseModel):
+    event_id: UUID
+    feature_version: int
+    computed_at: datetime
+    features: dict[str, Any]
