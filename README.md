@@ -4,10 +4,12 @@ A real-time payment fraud detection engine built from scratch: event ingestion, 
 feature computation, an explainable rules engine and an ML risk scorer, aiming to return
 `ALLOW` / `REVIEW` / `DENY` for every payment in under 100 ms.
 
-> **Status:** Milestones 1–5 of 7 complete — ingestion, a labelled synthetic traffic
+> **Status:** Milestones 1–6 of 7 complete — ingestion, a labelled synthetic traffic
 > generator, a streaming feature engine, explainable rules, a calibrated ML risk scorer with
-> SHAP explanations, and a decision service whose every decision can be re-derived from the
-> audit log. See the [roadmap](#roadmap).
+> SHAP explanations, a reconstructable audit log, and an analyst dashboard whose verdicts
+> feed model retraining. See the [roadmap](#roadmap).
+
+![Case view: why an event was flagged, model risk with SHAP contributions, the user's history and the verdict buttons](docs/images/case.png)
 
 ![CI](https://github.com/ADARSHputhane/fraud-detection-engine/actions/workflows/ci.yml/badge.svg)
 
@@ -35,10 +37,10 @@ flowchart LR
     DASH -->|labels| ML
 
     classDef done fill:#d1fae5,stroke:#059669,color:#064e3b;
-    class API,PG,RS,FE,RE,ML,D,AUD done;
+    class API,PG,RS,FE,RE,ML,D,AUD,DASH done;
 ```
 
-Green = built. The rest is on the roadmap below.
+Green = built.
 
 ## Milestone 1 results
 
@@ -187,6 +189,55 @@ model version in use. The API serves `/metrics`; the worker serves `:9100/metric
 `docker compose --profile monitoring up -d` adds a Prometheus server on
 [localhost:9090](http://localhost:9090).
 
+## Milestone 6 results
+
+A Next.js review dashboard on [localhost:3000](http://localhost:3000), and a feedback loop
+from analyst verdicts back into the model.
+
+**Triage in under 30 seconds** is a design target, so the case view is built around it:
+
+- **The "why" comes first:** fired rules with their one-line reasons, then the model's risk
+  score against the review and deny thresholds, then the five features that moved it (SHAP),
+  with plain-English names and values.
+- **Context without clicking:** the user's previous ten events with amounts, countries and
+  decisions, so "first time abroad, 9,000 km/h from home" is obvious at a glance.
+- **Keyboard only:** <kbd>F</kbd> confirm fraud, <kbd>L</kbd> legitimate, <kbd>U</kbd> undo,
+  <kbd>N</kbd> skip; labelling jumps straight to the next riskiest case. <kbd>J</kbd> /
+  <kbd>K</kbd> / <kbd>Enter</kbd> work the queue.
+- **Measured system time per case:** saving a verdict and fetching the next case takes
+  8.7 ms (p50); pages render in 15–120 ms. The rest of the 30 seconds is reading.
+
+| Review queue | Engine statistics |
+|---|---|
+| ![Review queue](docs/images/queue.png) | ![Statistics](docs/images/stats.png) |
+
+**Labels and the feedback loop.** An analyst's verdict is stored alongside ground truth
+(chargebacks in production, the generator's labels here) rather than overwriting it, and
+training uses the analyst's label when there is one. The case view never shows ground
+truth, which would make triage meaningless. `fraud-engine retrain` trains a challenger on
+the latest labels, scores it and the model in use on the *same* held-out events, writes a
+comparison report, and with `--promote-if-better` promotes it only on a strictly higher
+PR-AUC. Running services pick up the new model within seconds.
+
+Cold start, measured: with the label-free Isolation Forest in use, an analyst worked the 109
+cases in the queue (49% turned out to be fraud), and the retrained challenger was promoted —
+[full report](docs/example-model-comparison.md):
+
+| Same 7,085 held-out events | Isolation Forest (no labels) | XGBoost (labels) |
+|---|---|---|
+| Recall at score ≥ 40 | 63.3% | **90.2%** |
+| Recall at score > 75 | 27.2% | **89.6%** |
+| PR-AUC | 0.923 | **0.941** |
+
+Re-running retrain when nothing has changed produces an identical model (training is
+deterministic), and the report says to keep the current one: no churn without a measured
+gain.
+
+**Charts** are hand-built SVG and HTML, no chart library: a diverging red/blue pair for SHAP
+polarity, status colours only on decision badges (always with an icon and a label), a
+palette checked for colour-vision deficiency in light and dark mode, a hover/focus tooltip
+on every mark and a table view under every chart.
+
 ## Design decisions
 
 - **No real card data, ever.** `card_id` must be a token (`tok_…`). The schema detects raw
@@ -237,7 +288,7 @@ The output is deterministic for a given `--seed`.
 **With Docker:**
 
 ```bash
-docker compose up -d --build              # Postgres + Redis + API on :8000 + worker
+docker compose up -d --build              # Postgres, Redis, API :8000, worker, dashboard :3000
 pip install -e .                          # installs the fraud-gen CLI
 fraud-gen generate --users 500 --days 30 --out data/
 fraud-gen replay --file data/events.jsonl --limit 10000
@@ -249,7 +300,14 @@ fraud-engine train --promote              # the running worker picks it up withi
 # Check the engine
 fraud-engine latency-report               # throughput and latency from the audit log
 fraud-engine audit                        # re-derive every decision and compare
+
+# Feedback loop: label cases at http://localhost:3000, then
+fraud-engine load-labels                  # ground truth for training (demo data)
+fraud-engine retrain --promote-if-better  # champion vs challenger report in reports/
 ```
+
+**Dashboard without Docker:** `cd dashboard && npm ci && npm run dev` (expects the API on
+`localhost:8000`; set `API_URL` otherwise).
 
 Open http://localhost:8000/docs for interactive API docs.
 
@@ -274,6 +332,10 @@ pytest
 | `POST` | `/score` | Score a feature vector: calibrated 0–100 risk + top-5 SHAP contributions |
 | `GET` | `/models/current` | The model in use: version, features, test metrics |
 | `GET` | `/metrics` | Prometheus metrics (the worker serves its own on `:9100`) |
+| `GET` | `/decisions` | Review queue: filter by decision and label status, riskiest first |
+| `GET` | `/cases/{event_id}` | Everything for triage: event, decision, signals, user history |
+| `POST` | `/labels` | Record an analyst's verdict (`DELETE /labels/{event_id}` undoes it) |
+| `GET` | `/stats` | Dashboard statistics |
 | `GET` | `/health` | Postgres and Redis status |
 
 ```bash
@@ -295,7 +357,7 @@ curl -X POST localhost:8000/events/payment -H 'content-type: application/json' -
 - [x] **3. Rules engine** — YAML rules with human-readable reasons
 - [x] **4. ML risk scorer** — XGBoost + Isolation Forest, SHAP explanations
 - [x] **5. Decision service & audit log** — <100 ms end to end, Prometheus metrics
-- [ ] **6. Analyst dashboard** — Next.js review queue with a label feedback loop
+- [x] **6. Analyst dashboard** — Next.js review queue with a label feedback loop
 - [ ] **7. Write-up & demo**
 
 ## Project layout
@@ -305,11 +367,13 @@ src/fraud_engine/
   schemas.py      event contracts + card-number detection
   api.py          ingest routes
   scoring_api.py  read-side routes (features, decisions, rules, score, model)
+  review_api.py   analyst routes (queue, case, labels, stats)
   db.py           Postgres tables
   stream.py       Redis Streams publisher and consumer-group reader
   features/       feature catalogue, Redis feature engine, geo, IP/BIN reference data
   rules/          YAML ruleset, safe condition compiler, hot reload, evaluation
-  ml/             training set, XGBoost + Isolation Forest models, registry, training
+  ml/             training set, XGBoost + Isolation Forest models, registry, training,
+                  champion vs challenger comparison
   decision.py     combines rules and model score into ALLOW / REVIEW / DENY
   audit.py        re-derives stored decisions from the audit log and compares
   metrics.py      Prometheus metrics; reporting.py  latency and throughput from the log
@@ -317,16 +381,18 @@ src/fraud_engine/
   pipeline.py     per-event stages, timed
   worker.py       stream worker: batch, process in order, persist, acknowledge
   cli.py          fraud-engine worker | bench-features | build-features | evaluate-rules |
-                  load-labels | train | audit | latency-report
+                  load-labels | train | retrain | audit | latency-report
   main.py         app factory
   generator/      personas, fraud patterns, CLI
-tests/            schema, API, generator, feature and worker tests
+tests/            schema, API, generator, feature, worker, rules, ML, audit and review tests
+dashboard/        Next.js 14 review dashboard (queue, case view, stats)
 ```
 
 ## Tech
 
 Python 3.11+ · FastAPI · Pydantic v2 · SQLAlchemy 2 (async) · PostgreSQL · Redis Streams ·
-XGBoost · scikit-learn · pytest · Ruff · Docker · GitHub Actions
+XGBoost · scikit-learn · Prometheus · Next.js 14 · TypeScript · Tailwind CSS · pytest ·
+Ruff · Docker · GitHub Actions
 
 ---
 

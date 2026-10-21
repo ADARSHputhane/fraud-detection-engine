@@ -15,6 +15,7 @@ build/
 data/
 *.jsonl
 models/
+reports/
 
 # IDE
 .vscode/

@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
+from sqlalchemy.orm import aliased
 
 from ..db import Database, EventRecord, FeatureRecord, LabelRecord
 from ..features import NUMERIC_FEATURES
@@ -71,25 +72,43 @@ def from_files(features_path: Path, labels_path: Path) -> TrainingSet:
 
 
 async def from_db(db: Database) -> TrainingSet:
-    """Every event with both a stored feature vector and a label, in event-time order."""
+    """Every event with a stored feature vector and a label, in event-time order. An
+    analyst's label takes precedence over ground truth from other sources."""
+    analyst, truth = aliased(LabelRecord), aliased(LabelRecord)
     query = (
         select(
-            FeatureRecord.vector,
-            LabelRecord.is_fraud,
-            LabelRecord.pattern,
-            LabelRecord.source,
             FeatureRecord.event_id,
+            FeatureRecord.vector,
+            analyst.is_fraud.label("analyst_fraud"),
+            truth.is_fraud.label("truth_fraud"),
+            truth.pattern,
         )
-        .join(LabelRecord, LabelRecord.event_id == FeatureRecord.event_id)
         .join(EventRecord, EventRecord.event_id == FeatureRecord.event_id)
+        .outerjoin(
+            analyst,
+            and_(analyst.event_id == FeatureRecord.event_id, analyst.source == "analyst"),
+        )
+        .outerjoin(
+            truth, and_(truth.event_id == FeatureRecord.event_id, truth.source == "synthetic")
+        )
+        .where(or_(analyst.event_id.is_not(None), truth.event_id.is_not(None)))
         .order_by(EventRecord.occurred_at, EventRecord.event_id)
     )
     async with db.sessionmaker() as session:
         rows = (await session.execute(query)).all()
+    sources: Counter = Counter()
+    ys = []
+    for r in rows:
+        if r.analyst_fraud is not None:
+            ys.append(int(r.analyst_fraud))
+            sources["analyst"] += 1
+        else:
+            ys.append(int(r.truth_fraud))
+            sources["synthetic"] += 1
     return TrainingSet(
         vectors=[r.vector for r in rows],
-        y=np.asarray([int(r.is_fraud) for r in rows], dtype=np.int8),
+        y=np.asarray(ys, dtype=np.int8),
         event_ids=[str(r.event_id) for r in rows],
         patterns=[r.pattern for r in rows],
-        label_sources=Counter(r.source for r in rows),
+        label_sources=sources,
     )

@@ -111,6 +111,8 @@ class DecisionRecord(Base):
     __table_args__ = (
         Index("ix_decisions_decision_time", "final_decision", "decided_at"),
         Index("ix_decisions_time", "decided_at"),
+        # The case view shows the user's recent history next to the event under review.
+        Index("ix_decisions_user_time", "user_id", "occurred_at"),
     )
 
 
@@ -127,14 +129,19 @@ class RulesetRecord(Base):
 
 
 class LabelRecord(Base):
-    """Ground truth for training: one label per event. An analyst's verdict replaces a
-    synthetic or imported label; the reverse never happens."""
+    """Labels for training, one per event per source.
+
+    "synthetic" is the generator's ground truth (in production: chargebacks and confirmed
+    fraud reports); "analyst" is a verdict from the review dashboard. Training prefers the
+    analyst's label. Keeping both lets the stats page show how often analysts agree with
+    ground truth, instead of the analyst's verdict silently overwriting it.
+    """
 
     __tablename__ = "labels"
 
     event_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    source: Mapped[str] = mapped_column(String(16), primary_key=True)
     is_fraud: Mapped[bool] = mapped_column(Boolean)
-    source: Mapped[str] = mapped_column(String(16))  # "synthetic" or "analyst"
     pattern: Mapped[str | None] = mapped_column(String(32), nullable=True)
     analyst: Mapped[str | None] = mapped_column(String(64), nullable=True)
     note: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -159,6 +166,13 @@ class Database:
         already wrote."""
         dialect = postgresql if self.engine.dialect.name == "postgresql" else sqlite
         return dialect.insert(model).values(rows).on_conflict_do_nothing()
+
+    def upsert(self, model: type[Base], rows: list[dict], keys: list[str]) -> Insert:
+        """INSERT ... ON CONFLICT (keys) DO UPDATE, setting every non-key column."""
+        dialect = postgresql if self.engine.dialect.name == "postgresql" else sqlite
+        stmt = dialect.insert(model).values(rows)
+        columns = {c: stmt.excluded[c] for c in rows[0] if c not in keys}
+        return stmt.on_conflict_do_update(index_elements=keys, set_=columns)
 
     async def session(self) -> AsyncIterator[AsyncSession]:
         async with self.sessionmaker() as session:

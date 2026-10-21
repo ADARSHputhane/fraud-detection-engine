@@ -20,6 +20,7 @@ from .api import router
 from .config import Settings, get_settings
 from .db import Database
 from .ml import ModelRegistry
+from .review_api import router as review_router
 from .rules import RulesEngine
 from .scoring_api import router as scoring_router
 from .stream import EventStream
@@ -75,6 +76,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.include_router(router)
     app.include_router(scoring_router)
+    app.include_router(review_router)
     app.mount("/metrics", make_asgi_app())
     return app
 

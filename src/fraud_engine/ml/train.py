@@ -139,6 +139,8 @@ def _metadata(version: str, kind: str, ts: TrainingSet, splits: tuple[slice, ...
             "calibration": [ca.start, ca.stop],
             "test": [te.start, te.stop],
             "fraud_in_train": int(ts.y[tr].sum()),
+            # Lets a later comparison check the old model never trained on its test events.
+            "last_train_event_id": ts.event_ids[tr.stop - 1] if tr.stop else None,
         },
     }
 

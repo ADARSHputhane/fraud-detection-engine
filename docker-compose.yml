@@ -55,6 +55,16 @@ services:
     depends_on: *app-deps
     restart: unless-stopped
 
+  # Analyst dashboard on http://localhost:3000 (talks to the API over the compose network).
+  dashboard:
+    build: ./dashboard
+    environment:
+      API_URL: http://api:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
   # Optional: docker compose --profile monitoring up -d, then open http://localhost:9090
   # and query e.g. histogram_quantile(0.95, rate(fraud_end_to_end_seconds_bucket[1m])).
   prometheus:

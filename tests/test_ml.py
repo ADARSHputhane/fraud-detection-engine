@@ -265,8 +265,13 @@ async def test_training_set_from_db_joins_and_orders_by_event_time(app):
             session.add(
                 FeatureRecord(event_id=ids[i], feature_version=1, vector={"amount": float(i)})
             )
-        for i, source in ((0, "synthetic"), (1, "analyst"), (2, "synthetic")):
-            session.add(LabelRecord(event_id=ids[i], is_fraud=i == 1, source=source, pattern=None))
+        for i, source, is_fraud in (
+            (0, "synthetic", False),
+            (1, "synthetic", False),
+            (1, "analyst", True),  # the analyst overrules ground truth for event 1
+            (2, "synthetic", False),
+        ):
+            session.add(LabelRecord(event_id=ids[i], is_fraud=is_fraud, source=source))
         await session.commit()
 
     ts = await from_db(db)
@@ -274,3 +279,22 @@ async def test_training_set_from_db_joins_and_orders_by_event_time(app):
     assert ts.y.tolist() == [1, 0, 0]
     assert ts.X[:, NUMERIC_FEATURES.index("amount")].tolist() == [1.0, 2.0, 0.0]
     assert ts.label_sources == {"synthetic": 2, "analyst": 1}
+
+
+def test_champion_challenger_report(xgb_model, training_set, ruleset):
+    from fraud_engine.ml.compare import compare_models, render_markdown
+
+    model, _ = xgb_model
+    challenger, _ = train_xgboost(training_set, "xgb-next", ruleset, seed=7, latency_sample=50)
+    report = compare_models(model, challenger, training_set)
+    assert report["current"]["version"] == "xgb-test"
+    assert report["candidate"]["version"] == "xgb-next"
+    # Same data, same split: the champion trained only on events before the test period.
+    assert report["current_trained_on_test_events"] is False
+    markdown = render_markdown(report)
+    assert "| PR-AUC |" in markdown and ("Promote" in markdown or "Keep" in markdown)
+
+    first = compare_models(None, challenger, training_set)
+    assert first["candidate_wins"] is True and "| PR-AUC | — |" in render_markdown(first)
+    # An identical retrain is not an improvement, so it is not promoted.
+    assert compare_models(model, model, training_set)["candidate_wins"] is False

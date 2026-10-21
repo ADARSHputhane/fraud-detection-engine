@@ -6,6 +6,7 @@ fraud-engine build-features          compute feature vectors for a file of event
 fraud-engine evaluate-rules          recall / false-positive rate of a ruleset on labelled data
 fraud-engine load-labels             import ground-truth labels into Postgres
 fraud-engine train                   train a risk model (XGBoost, or Isolation Forest cold start)
+fraud-engine retrain                 retrain on the latest labels, compare with the model in use
 fraud-engine audit                   recompute stored decisions and check they match
 fraud-engine latency-report          throughput and latency read back from the audit log
 """
@@ -163,7 +164,7 @@ async def _load_labels(args: argparse.Namespace) -> int:
     ]
     async with db.sessionmaker() as session:
         for i in range(0, len(rows), 2_000):
-            # Insert-or-ignore: never overwrite a label an analyst already set.
+            # Insert-or-ignore: re-running the import is harmless.
             await session.execute(db.insert_ignore(LabelRecord, rows[i : i + 2_000]))
         await session.commit()
     await db.dispose()
@@ -201,6 +202,39 @@ async def _train(args: argparse.Namespace) -> int:
         print(f"promoted {version} -> {model_dir / ModelRegistry.POINTER}")
     else:
         print(f"saved to {path}; promote with --promote or by writing {version} to CURRENT")
+    return 0
+
+
+async def _retrain(args: argparse.Namespace) -> int:
+    from .ml import dataset, train
+    from .ml.compare import compare_models, render_markdown
+
+    settings = get_settings()
+    db = Database(settings.database_url)
+    try:
+        ts = await dataset.from_db(db)
+    finally:
+        await db.dispose()
+    if len(ts) < 100:
+        print(f"only {len(ts)} labelled events with features; need at least 100")
+        return 1
+    model_dir = Path(settings.model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    current = ModelRegistry(model_dir).current
+    ruleset = RulesEngine(Path(settings.rules_path) if settings.rules_path else None).ruleset
+    candidate, report = train.train_xgboost(ts, train.new_version("xgb", model_dir), ruleset)
+    train.save(candidate, report, model_dir)
+
+    comparison = compare_models(current, candidate, ts)
+    reports = Path(args.reports_dir)
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / f"{candidate.version}.json").write_text(json.dumps(comparison, indent=2))
+    markdown = render_markdown(comparison)
+    (reports / f"{candidate.version}.md").write_text(markdown)
+    print(markdown)
+    if args.promote_if_better and comparison["candidate_wins"]:
+        ModelRegistry.promote(model_dir, candidate.version)
+        print(f"promoted {candidate.version}")
     return 0
 
 
@@ -277,6 +311,11 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--seed", type=int, default=42)
     t.add_argument("--promote", action="store_true", help="make this the model in use")
     t.set_defaults(func=_train)
+
+    rt = sub.add_parser("retrain", help="retrain on the latest labels and compare")
+    rt.add_argument("--reports-dir", default="reports")
+    rt.add_argument("--promote-if-better", action="store_true")
+    rt.set_defaults(func=_retrain)
 
     a = sub.add_parser("audit", help="recompute stored decisions and compare")
     a.add_argument("--limit", type=int, default=0, help="most recent N decisions (0 = all)")

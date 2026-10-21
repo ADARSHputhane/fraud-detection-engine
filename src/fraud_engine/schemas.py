@@ -262,3 +262,74 @@ class ScoreResponse(BaseModel):
     band: Literal["ALLOW", "REVIEW", "DENY"]
     model_version: str
     explanation: list[Contribution] = Field(description="Top features pushing the score")
+
+
+class LabelIn(BaseModel):
+    """An analyst's verdict on an event."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    event_id: UUID
+    is_fraud: bool
+    analyst: str = Field(default="analyst", pattern=r"^[A-Za-z0-9_.@\-]{1,64}$")
+    note: str | None = Field(default=None, max_length=500)
+
+
+class LabelOut(BaseModel):
+    event_id: UUID
+    is_fraud: bool
+    source: str
+    analyst: str | None
+    note: str | None
+    labelled_at: datetime
+
+
+class QueueItem(BaseModel):
+    event_id: UUID
+    event_type: str
+    user_id: str
+    occurred_at: datetime
+    final_decision: Literal["ALLOW", "REVIEW", "DENY"]
+    decided_by: str
+    ml_score: float | None
+    rule_score: int
+    amount: str | None
+    currency: str | None
+    merchant_category: str | None
+    top_rule: RuleHitOut | None
+    top_feature: dict[str, Any] | None
+    analyst_label: bool | None
+
+
+class DecisionPage(BaseModel):
+    total: int
+    items: list[QueueItem]
+
+
+class FeatureValue(BaseModel):
+    name: str
+    group: str
+    kind: str
+    description: str
+    value: Any
+
+
+class HistoryItem(BaseModel):
+    event_id: UUID
+    event_type: str
+    occurred_at: datetime
+    final_decision: str
+    ml_score: float | None
+    amount: str | None
+    merchant_category: str | None
+    country: str | None
+
+
+class Case(BaseModel):
+    """Everything an analyst needs to triage one event, in one response."""
+
+    event: dict[str, Any]
+    decision: StoredDecision
+    features: list[FeatureValue]
+    label: LabelOut | None
+    history: list[HistoryItem]
