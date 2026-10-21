@@ -23,6 +23,7 @@ dependencies = [
     "numpy>=1.26",
     "scikit-learn>=1.5",
     "joblib>=1.4",
+    "prometheus-client>=0.20",
     # CPU-only build on Linux keeps the Docker image small; other platforms' wheels are CPU-only.
     "xgboost-cpu>=2.1; sys_platform == 'linux'",
     "xgboost>=2.1; sys_platform != 'linux'",

@@ -223,6 +223,7 @@ class StoredDecision(BaseModel):
     ml_score: float | None
     model_version: str | None
     shap_top5: list[dict[str, Any]] | None
+    thresholds: dict[str, float]
     latency_ms: float
     stage_ms: dict[str, float]
 

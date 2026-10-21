@@ -19,6 +19,7 @@ from sqlalchemy import (
     Insert,
     Integer,
     String,
+    Text,
     Uuid,
     func,
     select,
@@ -100,12 +101,28 @@ class DecisionRecord(Base):
     ml_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     shap_top5: Mapped[list | None] = mapped_column(JSONPayload, nullable=True)
+    # The score bands in force, so the decision can be recomputed after they change.
+    thresholds: Mapped[dict] = mapped_column(JSONPayload)
+    # Processing time (features + rules + model + decision); stage_ms also holds "queue",
+    # the wait between the API publishing the event and the worker picking it up.
     latency_ms: Mapped[float] = mapped_column(Float)
     stage_ms: Mapped[dict] = mapped_column(JSONPayload)
 
     __table_args__ = (
         Index("ix_decisions_decision_time", "final_decision", "decided_at"),
         Index("ix_decisions_time", "decided_at"),
+    )
+
+
+class RulesetRecord(Base):
+    """Every ruleset version that made a decision, so old decisions can be re-run."""
+
+    __tablename__ = "rulesets"
+
+    version: Mapped[str] = mapped_column(String(16), primary_key=True)
+    source: Mapped[str] = mapped_column(Text)
+    first_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )
 
 

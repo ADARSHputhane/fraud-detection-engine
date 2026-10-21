@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # Risk score bands: < review ALLOW, review..deny REVIEW, > deny DENY.
     review_threshold: float = 40.0
     deny_threshold: float = 75.0
+    # End-to-end budget per decision (queue wait + processing), tracked as a metric.
+    latency_budget_ms: float = 100.0
+    # The worker serves Prometheus metrics on this port.
+    metrics_port: int = 9100
 
 
 @lru_cache

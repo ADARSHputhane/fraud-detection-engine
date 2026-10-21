@@ -42,7 +42,7 @@ def _summarise_errors(resp: httpx.Response) -> str:
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    events = read_jsonl(Path(args.file))
+    events = read_jsonl(Path(args.file))[args.offset :]
     if args.limit:
         events = events[: args.limit]
     accepted = duplicates = failed = 0
@@ -50,9 +50,15 @@ def cmd_replay(args: argparse.Namespace) -> int:
     started = time.perf_counter()
 
     with httpx.Client(base_url=args.url, timeout=30) as client:
-        if args.single:
-            # One request per event: slower, but gives per-request latency numbers.
-            for event in events:
+        if args.single or args.rate:
+            # One request per event: slower, but gives per-request latency numbers. With
+            # --rate, requests are paced to a steady arrival rate, like live traffic.
+            interval = 1 / args.rate if args.rate else 0.0
+            for i, event in enumerate(events):
+                if interval:
+                    delay = started + i * interval - time.perf_counter()
+                    if delay > 0:
+                        time.sleep(delay)
                 t0 = time.perf_counter()
                 resp = client.post(f"/events/{event['event_type']}", json=event)
                 latencies.append((time.perf_counter() - t0) * 1000)
@@ -88,7 +94,13 @@ def cmd_replay(args: argparse.Namespace) -> int:
         "failed": failed,
         "seconds": round(elapsed, 2),
         "events_per_second": round(len(events) / elapsed, 1) if elapsed else None,
-        "mode": "single" if args.single else f"batch({args.batch_size})",
+        "mode": (
+            f"paced({args.rate}/s)"
+            if args.rate
+            else "single"
+            if args.single
+            else f"batch({args.batch_size})"
+        ),
     }
     if latencies:
         qs = statistics.quantiles(latencies, n=100) if len(latencies) >= 2 else latencies * 99
@@ -118,6 +130,10 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--batch-size", type=int, default=500)
     rep.add_argument("--single", action="store_true", help="one request per event")
     rep.add_argument("--limit", type=int, default=0, help="only send the first N events")
+    rep.add_argument("--offset", type=int, default=0, help="skip the first N events")
+    rep.add_argument(
+        "--rate", type=float, default=0, help="events per second, one request each (paced)"
+    )
     rep.set_defaults(func=cmd_replay)
 
     args = parser.parse_args(argv)

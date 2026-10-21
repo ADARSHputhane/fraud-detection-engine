@@ -200,7 +200,7 @@ class ModelRegistry:
     """
 
     POINTER = "CURRENT"
-    _VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    VERSION_PATTERN = _VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
     def __init__(self, model_dir: Path, check_interval: float = 10.0) -> None:
         self.model_dir = model_dir

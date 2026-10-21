@@ -25,6 +25,8 @@ class PipelineResult:
     decision: Decision
     decided_by: str
     timings_ms: dict[str, float] = field(default_factory=dict)
+    # Set by the worker: how long the event waited in the stream before processing began.
+    queue_ms: float = 0.0
 
     @property
     def event_id(self) -> str:

@@ -6,6 +6,8 @@ fraud-engine build-features          compute feature vectors for a file of event
 fraud-engine evaluate-rules          recall / false-positive rate of a ruleset on labelled data
 fraud-engine load-labels             import ground-truth labels into Postgres
 fraud-engine train                   train a risk model (XGBoost, or Isolation Forest cold start)
+fraud-engine audit                   recompute stored decisions and check they match
+fraud-engine latency-report          throughput and latency read back from the audit log
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
+from prometheus_client import start_http_server
 from redis.asyncio import Redis
 
 from .config import Settings, get_settings
@@ -71,7 +74,11 @@ async def _worker(args: argparse.Namespace) -> int:
         deadletter_stream=settings.deadletter_stream,
         batch_size=settings.worker_batch_size,
         block_ms=settings.worker_block_ms,
+        latency_budget_ms=settings.latency_budget_ms,
     )
+    if not args.drain:
+        start_http_server(settings.metrics_port)
+        logging.info("metrics on :%d/metrics", settings.metrics_port)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -197,6 +204,35 @@ async def _train(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _audit(args: argparse.Namespace) -> int:
+    from .audit import verify_decisions
+
+    settings = get_settings()
+    db = Database(settings.database_url)
+    try:
+        report = await verify_decisions(db, Path(settings.model_dir), args.limit or None)
+    finally:
+        await db.dispose()
+    print(json.dumps(report, indent=2))
+    return 0 if report["mismatched"] == 0 else 1
+
+
+async def _latency_report(args: argparse.Namespace) -> int:
+    from datetime import UTC, datetime, timedelta
+
+    from .reporting import latency_report
+
+    settings = get_settings()
+    db = Database(settings.database_url)
+    since = datetime.now(UTC) - timedelta(minutes=args.minutes) if args.minutes else None
+    try:
+        report = await latency_report(db, since)
+    finally:
+        await db.dispose()
+    print(json.dumps(report, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(
@@ -241,6 +277,14 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--seed", type=int, default=42)
     t.add_argument("--promote", action="store_true", help="make this the model in use")
     t.set_defaults(func=_train)
+
+    a = sub.add_parser("audit", help="recompute stored decisions and compare")
+    a.add_argument("--limit", type=int, default=0, help="most recent N decisions (0 = all)")
+    a.set_defaults(func=_audit)
+
+    lr = sub.add_parser("latency-report", help="throughput and latency from the audit log")
+    lr.add_argument("--minutes", type=float, default=0, help="only the last N minutes")
+    lr.set_defaults(func=_latency_report)
 
     args = parser.parse_args(argv)
     return asyncio.run(args.func(args))

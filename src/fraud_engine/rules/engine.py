@@ -206,6 +206,8 @@ class RulesEngine:
         self._mtime: float | None = None
         self._checked = monotonic()
         self.ruleset = self._load()
+        # Every version loaded in this process, so the audit log can store each one used.
+        self.history: dict[str, RuleSet] = {self.ruleset.version: self.ruleset}
 
     def _load(self) -> RuleSet:
         if self.path is None:
@@ -239,6 +241,7 @@ class RulesEngine:
         self.last_error = None
         changed = ruleset.version != self.ruleset.version
         self.ruleset = ruleset
+        self.history[ruleset.version] = ruleset
         if changed:
             log.info("rules reloaded: version %s, %d rules", ruleset.version, len(ruleset.rules))
         return changed

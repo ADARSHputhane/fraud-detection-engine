@@ -4,9 +4,10 @@ A real-time payment fraud detection engine built from scratch: event ingestion, 
 feature computation, an explainable rules engine and an ML risk scorer, aiming to return
 `ALLOW` / `REVIEW` / `DENY` for every payment in under 100 ms.
 
-> **Status:** Milestones 1–4 of 7 complete — event ingestion, a labelled synthetic traffic
-> generator, a streaming feature engine, an explainable rules engine and a calibrated ML risk
-> scorer with SHAP explanations. See the [roadmap](#roadmap).
+> **Status:** Milestones 1–5 of 7 complete — ingestion, a labelled synthetic traffic
+> generator, a streaming feature engine, explainable rules, a calibrated ML risk scorer with
+> SHAP explanations, and a decision service whose every decision can be re-derived from the
+> audit log. See the [roadmap](#roadmap).
 
 ![CI](https://github.com/ADARSHputhane/fraud-detection-engine/actions/workflows/ci.yml/badge.svg)
 
@@ -152,6 +153,40 @@ would be deployed.
   pickle for the main model. Versions live side by side in `models/`; `CURRENT` names the
   active one and running services swap to a newly promoted version without a restart.
 
+## Milestone 5 results
+
+The full stack running in Docker (API and worker containers built from the `Dockerfile`):
+
+| Check | Result | Target |
+|---|---|---|
+| Throughput, one worker, 30,000-event burst | **730 decisions/s** | ≥ 100/s |
+| End to end at a steady 100 events/s (publish → decision) | **2.6 ms p50 · 3.2 ms p95 · 4.5 ms p99** | < 100 ms |
+| Processing per event: features · rules · model | 0.7 · 0.01 · 0.4 ms (p50) | — |
+| Decisions recomputed from the audit log | **33,000 / 33,000 identical** | all reconstructable |
+
+**Decision hierarchy**, strongest first: a rule DENY always wins; a model score above 75
+denies; a rule REVIEW or a score of 40 or more goes to an analyst (a low score never cancels
+a rule's review); otherwise ALLOW. The audit row records which stage decided
+(`rule:R002`, `model` or `default`).
+
+**Reconstructable, not just logged.** Each decision row stores the fired rules with their
+reasons, the model score and SHAP top 5, the ruleset version, the model version, the
+thresholds in force and per-stage timings. Every ruleset version used is saved in a
+`rulesets` table, and model versions stay on disk. `fraud-engine audit` re-runs the stored
+feature vector through exactly that ruleset, model and thresholds and compares field by
+field; tampering with a stored decision is caught (there's a test for it).
+
+**Latency accounting.** A Redis stream id starts with the millisecond it was published, so
+the worker records how long each event *waited* as well as how long it *took*. During the
+burst test events queued for up to 40 s behind the backlog: that's throughput, not latency,
+and the `fraud_latency_budget_exceeded_total` counter shows exactly that.
+
+**Metrics** (Prometheus): ingest outcomes, decisions by outcome and source, rule hits,
+per-stage and end-to-end latency histograms, persist time, dead-lettered events and the
+model version in use. The API serves `/metrics`; the worker serves `:9100/metrics`;
+`docker compose --profile monitoring up -d` adds a Prometheus server on
+[localhost:9090](http://localhost:9090).
+
 ## Design decisions
 
 - **No real card data, ever.** `card_id` must be a token (`tok_…`). The schema detects raw
@@ -210,6 +245,10 @@ fraud-gen replay --file data/events.jsonl --limit 10000
 # Train a model (no services needed: features are computed with the live engine code)
 fraud-engine build-features --events data/events.jsonl --out data/features.jsonl
 fraud-engine train --promote              # the running worker picks it up within seconds
+
+# Check the engine
+fraud-engine latency-report               # throughput and latency from the audit log
+fraud-engine audit                        # re-derive every decision and compare
 ```
 
 Open http://localhost:8000/docs for interactive API docs.
@@ -234,6 +273,7 @@ pytest
 | `GET` | `/rules` | The ruleset currently in force |
 | `POST` | `/score` | Score a feature vector: calibrated 0–100 risk + top-5 SHAP contributions |
 | `GET` | `/models/current` | The model in use: version, features, test metrics |
+| `GET` | `/metrics` | Prometheus metrics (the worker serves its own on `:9100`) |
 | `GET` | `/health` | Postgres and Redis status |
 
 ```bash
@@ -254,7 +294,7 @@ curl -X POST localhost:8000/events/payment -H 'content-type: application/json' -
       impossible travel, IP/BIN country mismatch, card age
 - [x] **3. Rules engine** — YAML rules with human-readable reasons
 - [x] **4. ML risk scorer** — XGBoost + Isolation Forest, SHAP explanations
-- [ ] **5. Decision service & audit log** — <100 ms end to end, Prometheus metrics
+- [x] **5. Decision service & audit log** — <100 ms end to end, Prometheus metrics
 - [ ] **6. Analyst dashboard** — Next.js review queue with a label feedback loop
 - [ ] **7. Write-up & demo**
 
@@ -271,11 +311,13 @@ src/fraud_engine/
   rules/          YAML ruleset, safe condition compiler, hot reload, evaluation
   ml/             training set, XGBoost + Isolation Forest models, registry, training
   decision.py     combines rules and model score into ALLOW / REVIEW / DENY
+  audit.py        re-derives stored decisions from the audit log and compares
+  metrics.py      Prometheus metrics; reporting.py  latency and throughput from the log
   offline.py      the live feature engine run over a file (rule evaluation, training)
   pipeline.py     per-event stages, timed
   worker.py       stream worker: batch, process in order, persist, acknowledge
   cli.py          fraud-engine worker | bench-features | build-features | evaluate-rules |
-                  load-labels | train
+                  load-labels | train | audit | latency-report
   main.py         app factory
   generator/      personas, fraud patterns, CLI
 tests/            schema, API, generator, feature and worker tests

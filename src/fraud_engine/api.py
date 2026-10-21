@@ -10,6 +10,7 @@ from redis.exceptions import RedisError
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
+from . import metrics
 from .db import Database, EventRecord
 from .schemas import (
     BatchAccepted,
@@ -55,6 +56,7 @@ async def _ingest_one(request: Request, event: AnyEvent) -> EventAccepted:
         try:
             await session.commit()
         except IntegrityError:
+            metrics.INGESTED.labels(event.event_type, "duplicate").inc()
             raise HTTPException(
                 status.HTTP_409_CONFLICT, f"event {event.event_id} was already received"
             ) from None
@@ -67,10 +69,12 @@ async def _ingest_one(request: Request, event: AnyEvent) -> EventAccepted:
         async with db.sessionmaker() as session:
             await session.execute(delete(EventRecord).where(EventRecord.event_id == event.event_id))
             await session.commit()
+        metrics.INGESTED.labels(event.event_type, "unavailable").inc()
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE, "event stream unavailable, retry"
         ) from None
 
+    metrics.INGESTED.labels(event.event_type, "accepted").inc()
     return EventAccepted(event_id=event.event_id, stream_id=stream_id)
 
 
@@ -140,10 +144,16 @@ async def ingest_batch(batch: EventBatch, request: Request) -> BatchAccepted:
                     )
                 )
                 await session.commit()
+            for ev in new_events:
+                metrics.INGESTED.labels(ev.event_type, "unavailable").inc()
             raise HTTPException(
                 status.HTTP_503_SERVICE_UNAVAILABLE, "event stream unavailable, retry"
             ) from None
 
+    for ev in new_events:
+        metrics.INGESTED.labels(ev.event_type, "accepted").inc()
+    for _ in duplicates:
+        metrics.INGESTED.labels("unknown", "duplicate").inc()
     return BatchAccepted(accepted=len(new_events), duplicates=duplicates)
 
 

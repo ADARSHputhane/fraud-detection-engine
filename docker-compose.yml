@@ -55,5 +55,18 @@ services:
     depends_on: *app-deps
     restart: unless-stopped
 
+  # Optional: docker compose --profile monitoring up -d, then open http://localhost:9090
+  # and query e.g. histogram_quantile(0.95, rate(fraud_end_to_end_seconds_bucket[1m])).
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["monitoring"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+      - worker
+
 volumes:
   pgdata:

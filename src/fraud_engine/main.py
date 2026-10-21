@@ -12,6 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from prometheus_client import make_asgi_app
 from redis.asyncio import Redis
 
 from . import __version__
@@ -74,6 +75,7 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
     app.add_exception_handler(RequestValidationError, _validation_error)
     app.include_router(router)
     app.include_router(scoring_router)
+    app.mount("/metrics", make_asgi_app())
     return app
 
 
