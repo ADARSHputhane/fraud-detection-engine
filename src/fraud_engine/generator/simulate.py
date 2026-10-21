@@ -21,16 +21,26 @@ from .patterns import PATTERNS, Context
 from .personas import (
     CATEGORY_SPEND,
     DOMESTIC_CITIES,
+    TRAVEL_CITIES,
     Card,
     Persona,
+    datacenter_ip,
     domestic_bin,
     jitter,
     make_persona,
     new_token,
+    residential_ip,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
 _EVENT_ADAPTER: TypeAdapter = TypeAdapter(Event)
+
+# First-party ("friendly") fraud: a genuine purchase the cardholder later disputes. It looks
+# exactly like normal traffic, so no model can catch it; it caps achievable recall the way
+# it does in real data.
+FRIENDLY_FRAUD = "friendly_fraud"
+FRIENDLY_FRAUD_RATE = 0.02
+_DISPUTABLE = {MC.ELECTRONICS.value, MC.FASHION.value, MC.TRAVEL.value, MC.ENTERTAINMENT.value}
 
 
 @dataclass
@@ -79,21 +89,38 @@ def _normal_traffic(
         )
 
     cards = list(p.cards)
+    devices = list(p.devices)
     categories = list(p.category_weights)
     weights = list(p.category_weights.values())
     trip_until: datetime | None = None
     trip_city = None
+    abroad_until: datetime | None = None
+    abroad_city = None
     first_day = start.astimezone(IST).replace(hour=0, minute=0, second=0, microsecond=0)
 
     for d in range(days + 1):
         day = first_day + timedelta(days=d)
 
         # ~2% of days start a 1-3 day domestic trip: real travel, plausible speeds.
-        if trip_until is None and rng.random() < 0.02:
+        if trip_until is None and abroad_until is None and rng.random() < 0.02:
             trip_city = rng.choice([c for c in DOMESTIC_CITIES if c[0] != p.city])
             trip_until = day + timedelta(days=rng.randint(1, 3))
         if trip_until is not None and day >= trip_until:
             trip_until, trip_city = None, None
+
+        # A holiday abroad now and then. The flight days have no payments, so the first
+        # payment abroad is a plausible distance in time from the last one at home.
+        if abroad_until is None and trip_until is None and rng.random() < 0.0025:
+            abroad_city = rng.choice(TRAVEL_CITIES)
+            abroad_until = day + timedelta(days=rng.randint(4, 8))
+            continue  # outbound flight
+        if abroad_until is not None and day >= abroad_until:
+            abroad_until, abroad_city = None, None
+            continue  # flight home
+
+        # People replace their phones: a new device becomes the main one from today.
+        if rng.random() < 0.004:
+            devices.insert(0, new_token(rng, "dev_", 12))
 
         # A genuine new card now and then, used normally afterwards. New card != fraud.
         if rng.random() < 0.003:
@@ -112,10 +139,12 @@ def _normal_traffic(
                         rng,
                         user_id=p.user_id,
                         card=card,
-                        device_id=p.devices[0],
+                        device_id=devices[0],
                         ip=p.home_ip,
                         ts=ts,
                         location=ev.geo(*jitter(p.lat, p.lon, rng), "IN", p.city),
+                        # A spouse's or parent's card: the name legitimately differs.
+                        name_matches_account=rng.random() >= 0.15,
                     )
                 )
 
@@ -131,18 +160,24 @@ def _normal_traffic(
             median, sigma = CATEGORY_SPEND[category]
             amount = rng.lognormvariate(0, sigma) * median * p.spend_multiplier
 
-            if trip_city is not None:
+            country = "IN"
+            if abroad_city is not None:
+                city, country, lat, lon = abroad_city
+                ip = residential_ip(rng)  # hotel / local SIM
+            elif trip_city is not None:
                 city, lat, lon = trip_city
                 ip = p.mobile_ip
             else:
                 city, lat, lon = p.city, p.lat, p.lon
                 ip = p.home_ip if rng.random() < 0.6 else p.mobile_ip
-            location = ev.geo(*jitter(lat, lon, rng), "IN", city)
+            if ev.channel_for(category) != "card_present" and rng.random() < p.vpn_share:
+                ip = datacenter_ip(rng)  # privacy-conscious users pay through a VPN
+            location = ev.geo(*jitter(lat, lon, rng), country, city)
 
-            if rng.random() < 0.985 or len(p.devices) == 1:
-                device = p.devices[0]
+            if rng.random() < 0.985 or len(devices) == 1:
+                device = devices[0]
             else:
-                device = p.devices[1]
+                device = devices[1]
 
             common = dict(
                 user_id=p.user_id,
@@ -168,6 +203,23 @@ def _normal_traffic(
                     )
                 )
                 out.append(ev.payment(rng, ts=ts, **common))
+            elif roll < 0.006:
+                # Insufficient funds, retried a couple of times, then a smaller amount works.
+                t = ts - timedelta(minutes=rng.uniform(3, 10))
+                for _ in range(rng.randint(2, 3)):
+                    out.append(
+                        ev.payment(
+                            rng,
+                            ts=t,
+                            status="declined",
+                            decline_reason="insufficient_funds",
+                            **common,
+                        )
+                    )
+                    t += timedelta(seconds=rng.uniform(30, 120))
+                out.append(
+                    ev.payment(rng, ts=ts, **{**common, "amount": amount * rng.uniform(0.4, 0.8)})
+                )
             elif roll < 0.03:
                 out.append(
                     ev.payment(
@@ -200,15 +252,26 @@ def generate_dataset(
 
     personas = [make_persona(rng, start) for _ in range(users)]
     labelled: list[tuple[dict, bool, str | None, str | None]] = []
+    attacks: Counter[str] = Counter()
     for p in personas:
-        labelled.extend((e, False, None, None) for e in _normal_traffic(rng, p, start, end, days))
+        for e in _normal_traffic(rng, p, start, end, days):
+            disputed = (
+                e["event_type"] == "payment"
+                and e["status"] == "approved"
+                and e["merchant_category"] in _DISPUTABLE
+                and rng.random() < FRIENDLY_FRAUD_RATE
+            )
+            if disputed:
+                attacks[FRIENDLY_FRAUD] += 1
+                labelled.append((e, True, FRIENDLY_FRAUD, new_token(rng, "atk_", 10)))
+            else:
+                labelled.append((e, False, None, None))
 
     ctx = Context(rng=rng, personas=personas, window_start=start, window_end=end)
     names = list(PATTERNS)
     pattern_weights = [PATTERNS[n][1] for n in names]
     target = round(len(labelled) * fraud_rate / (1 - fraud_rate))
-    fraud_count = 0
-    attacks: Counter[str] = Counter()
+    fraud_count = attacks[FRIENDLY_FRAUD]
     while fraud_count < target:
         name = rng.choices(names, weights=pattern_weights)[0]
         attack_id = new_token(rng, "atk_", 10)

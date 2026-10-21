@@ -77,7 +77,8 @@ def card_testing(ctx: Context) -> Labelled:
     rng = ctx.rng
     user_id = new_token(rng, "usr_", 12)
     device = new_token(rng, "dev_", 12)
-    ip = datacenter_ip(rng)
+    # Most rings run from cloud servers; the better-equipped ones rent residential proxies.
+    ip = datacenter_ip(rng) if rng.random() < 0.6 else residential_ip(rng)
     if rng.random() < 0.6:
         location = _foreign_location(rng)
     else:  # fraud farms also route through domestic proxies
@@ -302,7 +303,7 @@ def amount_spike(ctx: Context) -> Labelled:
                     device_id=device,
                     ip=ip,
                     ts=t,
-                    amount=min(typical_spend(victim) * rng.uniform(20, 80), 200_000),
+                    amount=min(typical_spend(victim) * rng.uniform(8, 60), 200_000),
                     category=rng.choice([MC.GIFT_CARDS, MC.CRYPTO]),
                     location=location,
                     channel="online",
@@ -314,14 +315,21 @@ def amount_spike(ctx: Context) -> Labelled:
 
 
 def account_takeover(ctx: Context) -> Labelled:
-    """Stolen credentials: a new device on a hosting IP abroad drains the victim's existing
-    card through transfers and gift cards."""
+    """Stolen credentials drain the victim's existing card through transfers and gift cards.
+
+    Usually from a new device on a hosting IP abroad. About a third of the time the attacker
+    is on the victim's *own* phone and home connection (remote-access malware, a hijacked
+    session), which device, IP and location checks cannot see.
+    """
     rng = ctx.rng
     victim = ctx.victim()
     card = rng.choice(victim.cards)
-    device = new_token(rng, "dev_", 12)
-    ip = datacenter_ip(rng)
-    location = _foreign_location(rng)
+    if rng.random() < 0.35:
+        device, ip = victim.devices[0], victim.home_ip
+        location = _home_location(victim, rng)
+    else:
+        device, ip = new_token(rng, "dev_", 12), datacenter_ip(rng)
+        location = _foreign_location(rng)
     t = ctx.attack_time()
     out: Labelled = []
     for _ in range(rng.randint(2, 4)):
@@ -335,8 +343,8 @@ def account_takeover(ctx: Context) -> Labelled:
                     device_id=device,
                     ip=ip,
                     ts=t,
-                    amount=typical_spend(victim) * rng.uniform(5, 15),
-                    category=rng.choice([MC.MONEY_TRANSFER, MC.GIFT_CARDS]),
+                    amount=typical_spend(victim) * rng.uniform(3, 15),
+                    category=rng.choice([MC.MONEY_TRANSFER, MC.GIFT_CARDS, MC.ELECTRONICS]),
                     location=location,
                     channel="online",
                 ),

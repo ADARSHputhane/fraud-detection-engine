@@ -9,6 +9,7 @@ import pytest
 from fraud_engine.generator import generate_dataset
 from fraud_engine.generator.cli import main as cli_main
 from fraud_engine.generator.patterns import PATTERNS
+from fraud_engine.generator.simulate import FRIENDLY_FRAUD
 from fraud_engine.schemas import contains_pan
 
 END = datetime(2026, 10, 1, tzinfo=UTC)
@@ -41,7 +42,36 @@ def test_fraud_rate_near_target(dataset):
 
 
 def test_every_pattern_present(dataset):
-    assert set(dataset.stats["fraud_events_by_pattern"]) == set(PATTERNS)
+    assert set(dataset.stats["fraud_events_by_pattern"]) == set(PATTERNS) | {FRIENDLY_FRAUD}
+
+
+def test_realistic_noise_in_normal_traffic():
+    """Legitimate users must sometimes look suspicious, or one feature gives the label away."""
+    ds = generate_dataset(users=300, days=30, seed=11, end=END)
+    normal = [e for e, lbl in zip(ds.events, ds.labels, strict=True) if not lbl["is_fraud"]]
+    countries = {e["geo"]["country"] for e in normal if e.get("geo")}
+    assert countries - {"IN"}, "some genuine customers travel abroad"
+    from fraud_engine.features.reference import DatacenterRanges
+
+    ranges = DatacenterRanges.default()
+    assert any(ranges.contains(e["ip_address"]) for e in normal), "some use a VPN"
+    assert any(e.get("name_matches_account") is False for e in normal), "family cards"
+    retries = [e for e in normal if e.get("decline_reason") == "insufficient_funds"]
+    assert len(retries) > 10
+
+
+def test_some_account_takeovers_use_the_victims_own_device():
+    ds = generate_dataset(users=200, days=30, seed=5, end=END)
+    devices_by_user: dict[str, set[str]] = defaultdict(set)
+    for e, lbl in zip(ds.events, ds.labels, strict=True):
+        if not lbl["is_fraud"]:
+            devices_by_user[e["user_id"]].add(e["device_id"])
+    on_device = [
+        e
+        for e, lbl in zip(ds.events, ds.labels, strict=True)
+        if lbl["pattern"] == "account_takeover" and e["device_id"] in devices_by_user[e["user_id"]]
+    ]
+    assert on_device
 
 
 def test_events_time_ordered_and_labels_aligned(dataset):

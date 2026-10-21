@@ -39,6 +39,15 @@ FOREIGN_CITIES: list[tuple[str, str, float, float]] = [
     ("Kyiv", "UA", 50.4501, 30.5234),
 ]
 
+# (city, country, lat, lon) — where genuine customers go on holiday.
+TRAVEL_CITIES: list[tuple[str, str, float, float]] = [
+    ("Dubai", "AE", 25.2048, 55.2708),
+    ("Singapore", "SG", 1.3521, 103.8198),
+    ("Bangkok", "TH", 13.7563, 100.5018),
+    ("London", "GB", 51.5072, -0.1276),
+    ("Kathmandu", "NP", 27.7172, 85.3240),
+]
+
 # First octets of well-known cloud / hosting ranges. Fraud tooling often runs from these;
 # real customers almost never pay from a datacenter IP.
 DATACENTER_PREFIXES = ["3", "13", "18", "34", "35", "52", "54", "104.131", "159.65", "167.99"]
@@ -139,6 +148,8 @@ class Persona:
     spend_multiplier: float
     active_hours: tuple[int, int]  # local (IST) hours, inclusive start / exclusive end
     category_weights: dict[MC, float] = field(default_factory=dict)
+    # Share of online sessions routed through a VPN (a datacenter IP). Zero for most users.
+    vpn_share: float = 0.0
 
 
 def make_persona(rng: random.Random, window_start: datetime) -> Persona:
@@ -172,4 +183,5 @@ def make_persona(rng: random.Random, window_start: datetime) -> Persona:
         spend_multiplier=rng.lognormvariate(0, 0.4),
         active_hours=(start, end),
         category_weights=weights,
+        vpn_share=rng.uniform(0.3, 0.7) if rng.random() < 0.05 else 0.0,
     )
