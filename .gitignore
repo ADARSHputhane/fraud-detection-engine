@@ -11,9 +11,10 @@ htmlcov/
 dist/
 build/
 
-# generated synthetic data
+# generated synthetic data and trained models
 data/
 *.jsonl
+models/
 
 # IDE
 .vscode/

@@ -42,11 +42,13 @@ rules:
     reason: "{amount_vs_typical:.0f}x the user's typical spend on a card added {card_age_hours:.1f} h ago"
 
   - id: R005
-    name: Many cards on one device
-    condition: device_distinct_cards_24h >= 4
+    name: Many cards on a fresh device
+    # A long-standing device with four cards is usually someone with four cards; a device
+    # first seen days ago cycling through cards is how carding rigs look.
+    condition: device_distinct_cards_24h >= 4 and device_age_hours < 72
     action: REVIEW
     weight: 50
-    reason: "{device_distinct_cards_24h} different cards used on this device within 24 hours"
+    reason: "{device_distinct_cards_24h} different cards within 24 hours on a device first seen {device_age_hours:.1f} h ago"
 
   - id: R006
     name: Hosting IP on a new device

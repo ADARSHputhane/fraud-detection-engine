@@ -33,8 +33,11 @@ services:
       # Edit src/fraud_engine/rules/default_rules.yml on the host: the running services pick
       # the change up within a couple of seconds (hot reload), no rebuild needed.
       RULES_PATH: /app/rules/default_rules.yml
+      # Models trained on the host (fraud-engine train --promote) are picked up live.
+      MODEL_DIR: /app/models
     volumes: &app-volumes
       - ./src/fraud_engine/rules:/app/rules:ro
+      - ./models:/app/models:ro
     ports:
       - "8000:8000"
     depends_on: &app-deps

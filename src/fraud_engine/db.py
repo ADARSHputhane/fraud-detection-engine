@@ -12,6 +12,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Float,
     Index,
@@ -105,6 +106,23 @@ class DecisionRecord(Base):
     __table_args__ = (
         Index("ix_decisions_decision_time", "final_decision", "decided_at"),
         Index("ix_decisions_time", "decided_at"),
+    )
+
+
+class LabelRecord(Base):
+    """Ground truth for training: one label per event. An analyst's verdict replaces a
+    synthetic or imported label; the reverse never happens."""
+
+    __tablename__ = "labels"
+
+    event_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    is_fraud: Mapped[bool] = mapped_column(Boolean)
+    source: Mapped[str] = mapped_column(String(16))  # "synthetic" or "analyst"
+    pattern: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    analyst: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    labelled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )
 
 

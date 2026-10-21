@@ -165,7 +165,7 @@ def _vector_for(rule_id: str) -> dict:
         ),
         "R003": base(card_failed_attempts_1h=5, payment_approved=True),
         "R004": base(new_card_high_amount=True, amount_vs_typical=30.0, card_age_hours=0.5),
-        "R005": base(device_distinct_cards_24h=4),
+        "R005": base(device_distinct_cards_24h=4, device_age_hours=2.0),
         "R006": base(datacenter_ip=True, new_device=True, device_age_hours=0.1),
         "R007": base(
             impossible_travel=True, new_device=False, new_country=False, travel_speed_kmh=5000.0

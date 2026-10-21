@@ -23,6 +23,8 @@ async def app(tmp_path, redis):
     settings = Settings(
         database_url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}",
         stream_name=STREAM,
+        # Never pick up a model trained in the working copy.
+        model_dir=str(tmp_path / "models"),
     )
     application = create_app(settings, redis=redis)
     async with application.router.lifespan_context(application):

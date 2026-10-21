@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # Rules YAML; unset means the packaged default ruleset. Hot-reloaded when it changes.
     rules_path: str | None = None
     rules_reload_seconds: float = 2.0
+    # Trained model versions live here; MODEL_DIR/CURRENT names the one in use.
+    model_dir: str = "models"
+    model_reload_seconds: float = 10.0
+    # Risk score bands: < review ALLOW, review..deny REVIEW, > deny DENY.
+    review_threshold: float = 40.0
+    deny_threshold: float = 75.0
 
 
 @lru_cache

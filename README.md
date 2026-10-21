@@ -4,9 +4,9 @@ A real-time payment fraud detection engine built from scratch: event ingestion, 
 feature computation, an explainable rules engine and an ML risk scorer, aiming to return
 `ALLOW` / `REVIEW` / `DENY` for every payment in under 100 ms.
 
-> **Status:** Milestones 1–3 of 7 complete — event ingestion, a labelled synthetic traffic
-> generator, a streaming feature engine and an explainable rules engine. See the
-> [roadmap](#roadmap).
+> **Status:** Milestones 1–4 of 7 complete — event ingestion, a labelled synthetic traffic
+> generator, a streaming feature engine, an explainable rules engine and a calibrated ML risk
+> scorer with SHAP explanations. See the [roadmap](#roadmap).
 
 ![CI](https://github.com/ADARSHputhane/fraud-detection-engine/actions/workflows/ci.yml/badge.svg)
 
@@ -34,7 +34,7 @@ flowchart LR
     DASH -->|labels| ML
 
     classDef done fill:#d1fae5,stroke:#059669,color:#064e3b;
-    class API,PG,RS,FE,RE,D,AUD done;
+    class API,PG,RS,FE,RE,ML,D,AUD done;
 ```
 
 Green = built. The rest is on the roadmap below.
@@ -85,23 +85,27 @@ an analyst, hot-reloaded when the file changes, and every hit carries a sentence
 it, e.g. *"Card used 4540 km from its last payment, at 5988 km/h, from a new device or
 country"*.
 
-Measured on all 35,961 labelled events (1,807 fraudulent):
+Measured on all 35,421 labelled events (1,775 fraudulent):
 
 | Ruleset | Recall | False-positive rate | DENY false-positive rate |
 |---|---|---|---|
-| Starter rules R001–R006 from the plan | 89.1% | 0.17% | 0.16% |
-| **After error analysis (R001–R010)** | **99.7%** | **0.17%** | **0.01%** |
+| Starter rules R001–R006 from the plan | 74.3% | 0.30% | 0.15% |
+| **After error analysis (R001–R010)** | **90.9%** | **0.17%** | **0.01%** |
 
-Target: ≥ 80% recall at < 2% false positives. Synthetic attacks are cleaner than real ones,
-so treat these as an upper bound; the ML model in Milestone 4 is what has to generalise.
+Target: ≥ 80% recall at < 2% false positives. The starter rules miss it; error analysis
+closes the gap. The remaining misses are account takeovers on the victim's own device
+(76% caught) and friendly fraud (0%, by design).
 
 What the error analysis found:
 
-- **54 of the 57 false alarms were genuine cardholders paying at home minutes after a
-  fraudster used their card abroad.** Relative to the fraud, the genuine purchase looks like
-  impossible travel. The rule was right that the card is compromised, but denying the real
-  customer is the wrong call. Impossible travel is now split: to a *new* device or country is
-  DENY (R002); back to a familiar device and country is REVIEW (R007).
+- **Most false alarms from the impossible-travel rule were genuine cardholders paying at
+  home minutes after a fraudster used their card abroad.** Relative to the fraud, the genuine
+  purchase looks like impossible travel. The rule is right that the card is compromised, but
+  denying the real customer is the wrong call. Impossible travel is now split: to a *new*
+  device or country is DENY (R002); back to a familiar device and country is REVIEW (R007).
+- **"Four cards on one device" also fired on people who simply own four cards.** It now
+  needs a device first seen in the last 72 hours (R005), which is what a carding rig looks
+  like.
 - **The misses shared one fingerprint**: a device new to the account combined with a new
   country and a foreign-issued card (R009), repeated declines (R008), or a cardholder-name
   mismatch (R010).
@@ -111,6 +115,42 @@ What the error analysis found:
 Safety: conditions are parsed with Python's `ast` and checked against an allow-list
 (comparisons, `and`/`or`/`not`, feature names, literals); nothing reaches `eval()`. Unknown
 feature names fail at load time, and a broken edit leaves the last good ruleset running.
+
+## Milestone 4 results
+
+An XGBoost classifier scores every event 0–100, with the five features that pushed the score
+most (exact TreeSHAP values). Trained on the oldest 60% of events, calibrated on the next 20%,
+and **every number below is from the newest 20%, which the model never saw** — the way it
+would be deployed.
+
+| On the 7,085 held-out events (316 fraudulent) | Recall | False-positive rate | Precision |
+|---|---|---|---|
+| Rules alone | 87.0% | 0.21% | 95.2% |
+| **XGBoost alone** (score ≥ 40) | **90.2%** | **0.01%** | 99.7% |
+| Combined decision, DENY only | 89.6% | 0.00% | 100% |
+| Isolation Forest, no labels (cold-start fallback) | 63.3% | 0.00% | 100% |
+
+| Check | Result | Target |
+|---|---|---|
+| AUC-ROC, held out | **0.984** (PR-AUC 0.941) | ≥ 0.90 |
+| Scoring latency incl. SHAP, single event | **0.33 ms p95** | < 30 ms |
+| Calibration (Brier score) | 0.0043 | — |
+
+- **Class imbalance:** fraud is 5% of events; `scale_pos_weight` ≈ 19 stops the model from
+  scoring everything as legitimate.
+- **Calibrated scores:** reweighting inflates raw probabilities on purpose, so they are
+  re-mapped with Platt scaling on the held-out calibration period. On the test period,
+  events scored 5–20 averaged 8.4 and were 9.4% fraud; events scored 90+ averaged 99.4 and
+  were all fraud. The middle of the range holds too few events (2–7 per band) to verify, a
+  consequence of how cleanly the model separates the classes.
+- **Where the model beats the rules:** account takeovers on the victim's own device
+  (83% vs 76%), which no device or location rule can see.
+- **Explanations:** XGBoost's built-in TreeSHAP (`pred_contribs=True`), exact and additive
+  (contributions + bias = the model's output, checked in the tests), without pulling in the
+  `shap` package.
+- **Safe model files:** XGBoost's own JSON format and calibration parameters as JSON; no
+  pickle for the main model. Versions live side by side in `models/`; `CURRENT` names the
+  active one and running services swap to a newly promoted version without a restart.
 
 ## Design decisions
 
@@ -133,20 +173,27 @@ feature names fail at load time, and a broken edit leaves the last good ruleset 
 ## Synthetic data
 
 No public dataset has the mix of signals this engine needs, so `fraud-gen` simulates it.
-500 users over 30 days gives about 36,000 events, 5% of them fraudulent.
+500 users over 30 days gives about 35,000 events, 5% of them fraudulent.
 
 Normal users get a home city, one to three long-standing cards, active hours, a personal
-spending mix and realistic noise: domestic trips, a mistyped CVV followed by a successful
-retry, occasional late-night orders, the odd legitimate gift-card purchase. That noise
+spending mix and realistic noise: domestic trips and holidays abroad, new phones, VPNs, a
+mistyped CVV followed by a successful retry, insufficient-funds retries, a family member's
+card, occasional late-night orders, the odd legitimate gift-card purchase. That noise
 matters, because a good engine has to tell it apart from real attacks.
+
+The noise was added after the first model scored a perfect AUC of 1.0: every attack used a
+brand-new device and genuine users almost never did, so one feature gave the label away.
+Perfect scores on held-out data usually mean the data is too easy, not that the model is
+good.
 
 | Injected pattern | What happens |
 |---|---|
-| **Card testing** | Throwaway account on a datacenter IP adds 3–6 stolen cards, probes each with ₹1–₹99 charges (mostly declined), cashes out the live ones on gift cards |
+| **Card testing** | Throwaway account on a datacenter IP (or a residential proxy) adds 3–6 stolen cards, probes each with ₹1–₹99 charges (mostly declined), cashes out the live ones on gift cards |
 | **CVV brute force** | 5–10 `incorrect_cvv` declines on one card within minutes, then an approved high-value electronics purchase |
 | **Impossible travel** | Cardholder pays at home; 10–90 minutes later the cloned card is swiped abroad |
-| **Amount spike** | New card added to a victim's account between 1 and 5 am IST, then a purchase 20–80× their normal spend on gift cards or crypto |
-| **Account takeover** | New device on a foreign hosting IP drains the victim's existing card via transfers and gift cards |
+| **Amount spike** | New card added to a victim's account between 1 and 5 am IST, then a purchase 8–60× their normal spend on gift cards or crypto |
+| **Account takeover** | New device on a foreign hosting IP drains the victim's existing card via transfers and gift cards — or, a third of the time, the attacker is on the victim's *own* phone and home connection |
+| **Friendly fraud** | A genuine purchase the cardholder later disputes. Indistinguishable from normal traffic, so it caps achievable recall, as in real data |
 
 The output is deterministic for a given `--seed`.
 
@@ -159,6 +206,10 @@ docker compose up -d --build              # Postgres + Redis + API on :8000 + wo
 pip install -e .                          # installs the fraud-gen CLI
 fraud-gen generate --users 500 --days 30 --out data/
 fraud-gen replay --file data/events.jsonl --limit 10000
+
+# Train a model (no services needed: features are computed with the live engine code)
+fraud-engine build-features --events data/events.jsonl --out data/features.jsonl
+fraud-engine train --promote              # the running worker picks it up within seconds
 ```
 
 Open http://localhost:8000/docs for interactive API docs.
@@ -181,6 +232,8 @@ pytest
 | `GET` | `/features/{event_id}` | The feature vector the worker computed for an event |
 | `GET` | `/decisions/{event_id}` | Audit-log entry: decision, fired rules with reasons, timings |
 | `GET` | `/rules` | The ruleset currently in force |
+| `POST` | `/score` | Score a feature vector: calibrated 0–100 risk + top-5 SHAP contributions |
+| `GET` | `/models/current` | The model in use: version, features, test metrics |
 | `GET` | `/health` | Postgres and Redis status |
 
 ```bash
@@ -200,7 +253,7 @@ curl -X POST localhost:8000/events/payment -H 'content-type: application/json' -
 - [x] **2. Feature engine** — velocity counters (Redis sorted sets), amount z-scores,
       impossible travel, IP/BIN country mismatch, card age
 - [x] **3. Rules engine** — YAML rules with human-readable reasons
-- [ ] **4. ML risk scorer** — XGBoost + Isolation Forest, SHAP explanations
+- [x] **4. ML risk scorer** — XGBoost + Isolation Forest, SHAP explanations
 - [ ] **5. Decision service & audit log** — <100 ms end to end, Prometheus metrics
 - [ ] **6. Analyst dashboard** — Next.js review queue with a label feedback loop
 - [ ] **7. Write-up & demo**
@@ -211,16 +264,18 @@ curl -X POST localhost:8000/events/payment -H 'content-type: application/json' -
 src/fraud_engine/
   schemas.py      event contracts + card-number detection
   api.py          ingest routes
-  scoring_api.py  read-side routes (features, decisions, rules)
+  scoring_api.py  read-side routes (features, decisions, rules, score, model)
   db.py           Postgres tables
   stream.py       Redis Streams publisher and consumer-group reader
   features/       feature catalogue, Redis feature engine, geo, IP/BIN reference data
   rules/          YAML ruleset, safe condition compiler, hot reload, evaluation
-  decision.py     combines stage outputs into ALLOW / REVIEW / DENY
+  ml/             training set, XGBoost + Isolation Forest models, registry, training
+  decision.py     combines rules and model score into ALLOW / REVIEW / DENY
   offline.py      the live feature engine run over a file (rule evaluation, training)
   pipeline.py     per-event stages, timed
   worker.py       stream worker: batch, process in order, persist, acknowledge
-  cli.py          fraud-engine worker | bench-features | build-features | evaluate-rules
+  cli.py          fraud-engine worker | bench-features | build-features | evaluate-rules |
+                  load-labels | train
   main.py         app factory
   generator/      personas, fraud patterns, CLI
 tests/            schema, API, generator, feature and worker tests
@@ -229,7 +284,7 @@ tests/            schema, API, generator, feature and worker tests
 ## Tech
 
 Python 3.11+ · FastAPI · Pydantic v2 · SQLAlchemy 2 (async) · PostgreSQL · Redis Streams ·
-pytest · Ruff · Docker · GitHub Actions
+XGBoost · scikit-learn · pytest · Ruff · Docker · GitHub Actions
 
 ---
 

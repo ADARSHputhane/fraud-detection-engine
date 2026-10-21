@@ -38,6 +38,9 @@ def _decision_row(r: PipelineResult) -> dict:
         "rules_fired": [h.to_dict() for h in r.rules.hits],
         "rule_score": r.rules.score,
         "ruleset_version": r.rules.ruleset_version,
+        "ml_score": r.ml.score if r.ml else None,
+        "model_version": r.ml.model_version if r.ml else None,
+        "shap_top5": r.ml.explanation if r.ml else None,
         "latency_ms": r.latency_ms,
         "stage_ms": r.timings_ms,
     }

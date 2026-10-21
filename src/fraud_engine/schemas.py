@@ -240,3 +240,24 @@ class RulesetOut(BaseModel):
     version: str
     rules: list[RuleOut]
     last_reload_error: str | None
+
+
+class ScoreRequest(BaseModel):
+    """A feature vector to score. Missing features are treated as unknown."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    features: dict[str, Any]
+
+
+class Contribution(BaseModel):
+    feature: str
+    value: Any
+    contribution: float
+
+
+class ScoreResponse(BaseModel):
+    score: float = Field(description="Calibrated risk, 0-100")
+    band: Literal["ALLOW", "REVIEW", "DENY"]
+    model_version: str
+    explanation: list[Contribution] = Field(description="Top features pushing the score")

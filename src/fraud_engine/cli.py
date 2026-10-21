@@ -4,6 +4,8 @@ fraud-engine worker                  consume the stream and score events
 fraud-engine bench-features          time feature computation against a real Redis
 fraud-engine build-features          compute feature vectors for a file of events (offline)
 fraud-engine evaluate-rules          recall / false-positive rate of a ruleset on labelled data
+fraud-engine load-labels             import ground-truth labels into Postgres
+fraud-engine train                   train a risk model (XGBoost, or Isolation Forest cold start)
 """
 
 from __future__ import annotations
@@ -20,15 +22,29 @@ from uuid import uuid4
 
 from redis.asyncio import Redis
 
-from .config import get_settings
-from .db import Database
+from .config import Settings, get_settings
+from .db import Database, LabelRecord
 from .features import FeatureEngine
 from .jsonl import read_jsonl, write_jsonl
+from .ml import ModelRegistry
 from .offline import build_features, join_labels
 from .pipeline import Pipeline
 from .rules import RulesEngine, evaluate_ruleset
 from .stream import EventConsumer
 from .worker import Worker
+
+
+def build_pipeline(settings: Settings, redis: Redis) -> Pipeline:
+    return Pipeline(
+        FeatureEngine(redis, prefix=settings.feature_prefix),
+        RulesEngine(
+            Path(settings.rules_path) if settings.rules_path else None,
+            settings.rules_reload_seconds,
+        ),
+        ModelRegistry(Path(settings.model_dir), settings.model_reload_seconds),
+        review_at=settings.review_threshold,
+        deny_above=settings.deny_threshold,
+    )
 
 
 def _percentiles(values: list[float]) -> dict[str, float]:
@@ -51,13 +67,7 @@ async def _worker(args: argparse.Namespace) -> int:
         consumer=EventConsumer(
             redis, settings.stream_name, settings.consumer_group, settings.consumer_name
         ),
-        pipeline=Pipeline(
-            FeatureEngine(redis, prefix=settings.feature_prefix),
-            RulesEngine(
-                Path(settings.rules_path) if settings.rules_path else None,
-                settings.rules_reload_seconds,
-            ),
-        ),
+        pipeline=build_pipeline(settings, redis),
         deadletter_stream=settings.deadletter_stream,
         batch_size=settings.worker_batch_size,
         block_ms=settings.worker_block_ms,
@@ -129,6 +139,64 @@ async def _evaluate_rules(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _load_labels(args: argparse.Namespace) -> int:
+    from uuid import UUID
+
+    settings = get_settings()
+    db = Database(settings.database_url)
+    await db.create_tables()
+    rows = [
+        {
+            "event_id": UUID(lbl["event_id"]),
+            "is_fraud": bool(lbl["is_fraud"]),
+            "source": "synthetic",
+            "pattern": lbl.get("pattern"),
+        }
+        for lbl in read_jsonl(Path(args.file))
+    ]
+    async with db.sessionmaker() as session:
+        for i in range(0, len(rows), 2_000):
+            # Insert-or-ignore: never overwrite a label an analyst already set.
+            await session.execute(db.insert_ignore(LabelRecord, rows[i : i + 2_000]))
+        await session.commit()
+    await db.dispose()
+    print(f"loaded up to {len(rows):,} labels (existing labels kept)")
+    return 0
+
+
+async def _train(args: argparse.Namespace) -> int:
+    from .ml import dataset, train
+
+    settings = get_settings()
+    if args.source == "db":
+        db = Database(settings.database_url)
+        ts = await dataset.from_db(db)
+        await db.dispose()
+    else:
+        ts = dataset.from_files(Path(args.features), Path(args.labels))
+    if len(ts) < 100:
+        print(f"only {len(ts)} labelled events with features; need at least 100")
+        return 1
+
+    model_dir = Path(args.model_dir or settings.model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    ruleset = RulesEngine(Path(settings.rules_path) if settings.rules_path else None).ruleset
+    if args.algorithm == "xgboost":
+        version = train.new_version("xgb", model_dir)
+        model, report = train.train_xgboost(ts, version, ruleset, seed=args.seed)
+    else:
+        version = train.new_version("iforest", model_dir)
+        model, report = train.train_isolation_forest(ts, version, ruleset, seed=args.seed)
+    path = train.save(model, report, model_dir)
+    print(json.dumps({"version": version, **report}, indent=2))
+    if args.promote:
+        ModelRegistry.promote(model_dir, version)
+        print(f"promoted {version} -> {model_dir / ModelRegistry.POINTER}")
+    else:
+        print(f"saved to {path}; promote with --promote or by writing {version} to CURRENT")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(
@@ -159,6 +227,20 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--labels", default="data/labels.jsonl")
     e.add_argument("--rules", default=None, help="rules YAML (default: the packaged ruleset)")
     e.set_defaults(func=_evaluate_rules)
+
+    lb = sub.add_parser("load-labels", help="import ground-truth labels into Postgres")
+    lb.add_argument("--file", default="data/labels.jsonl")
+    lb.set_defaults(func=_load_labels)
+
+    t = sub.add_parser("train", help="train and evaluate a risk model")
+    t.add_argument("--source", choices=["files", "db"], default="files")
+    t.add_argument("--features", default="data/features.jsonl")
+    t.add_argument("--labels", default="data/labels.jsonl")
+    t.add_argument("--algorithm", choices=["xgboost", "isolation-forest"], default="xgboost")
+    t.add_argument("--model-dir", default=None, help="defaults to MODEL_DIR")
+    t.add_argument("--seed", type=int, default=42)
+    t.add_argument("--promote", action="store_true", help="make this the model in use")
+    t.set_defaults(func=_train)
 
     args = parser.parse_args(argv)
     return asyncio.run(args.func(args))
