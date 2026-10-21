@@ -30,6 +30,11 @@ services:
     environment: &app-env
       DATABASE_URL: postgresql+psycopg://fraud:fraud@postgres:5432/fraud
       REDIS_URL: redis://redis:6379/0
+      # Edit src/fraud_engine/rules/default_rules.yml on the host: the running services pick
+      # the change up within a couple of seconds (hot reload), no rebuild needed.
+      RULES_PATH: /app/rules/default_rules.yml
+    volumes: &app-volumes
+      - ./src/fraud_engine/rules:/app/rules:ro
     ports:
       - "8000:8000"
     depends_on: &app-deps
@@ -43,6 +48,7 @@ services:
     build: .
     command: ["fraud-engine", "worker"]
     environment: *app-env
+    volumes: *app-volumes
     depends_on: *app-deps
     restart: unless-stopped
 

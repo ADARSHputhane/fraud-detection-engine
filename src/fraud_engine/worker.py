@@ -12,11 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from .db import Database, FeatureRecord
+from .db import Database, DecisionRecord, FeatureRecord
 from .features import FEATURE_VERSION
 from .pipeline import Pipeline, PipelineResult
 from .stream import Entry, EventConsumer
@@ -24,6 +25,22 @@ from .stream import Entry, EventConsumer
 log = logging.getLogger(__name__)
 
 PERSIST_RETRIES = 5
+
+
+def _decision_row(r: PipelineResult) -> dict:
+    return {
+        "event_id": UUID(r.event_id),
+        "event_type": r.event["event_type"],
+        "user_id": r.event["user_id"],
+        "occurred_at": datetime.fromisoformat(r.event["timestamp"]),
+        "final_decision": r.decision,
+        "decided_by": r.decided_by,
+        "rules_fired": [h.to_dict() for h in r.rules.hits],
+        "rule_score": r.rules.score,
+        "ruleset_version": r.rules.ruleset_version,
+        "latency_ms": r.latency_ms,
+        "stage_ms": r.timings_ms,
+    }
 
 
 class Worker:
@@ -77,12 +94,14 @@ class Worker:
     async def persist(self, results: list[PipelineResult]) -> None:
         if not results:
             return
-        rows = [
+        features = [
             {"event_id": UUID(r.event_id), "feature_version": FEATURE_VERSION, "vector": r.features}
             for r in results
         ]
+        decisions = [_decision_row(r) for r in results]
         async with self.db.sessionmaker() as session:
-            await session.execute(self.db.insert_ignore(FeatureRecord, rows))
+            await session.execute(self.db.insert_ignore(FeatureRecord, features))
+            await session.execute(self.db.insert_ignore(DecisionRecord, decisions))
             await session.commit()
 
     async def run_once(self) -> int:

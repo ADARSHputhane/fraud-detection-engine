@@ -199,3 +199,44 @@ class StoredFeatures(BaseModel):
     feature_version: int
     computed_at: datetime
     features: dict[str, Any]
+
+
+class RuleHitOut(BaseModel):
+    id: str
+    name: str
+    action: Literal["DENY", "REVIEW"]
+    weight: int
+    reason: str
+
+
+class StoredDecision(BaseModel):
+    event_id: UUID
+    event_type: str
+    user_id: str
+    occurred_at: datetime
+    decided_at: datetime
+    final_decision: Literal["ALLOW", "REVIEW", "DENY"]
+    decided_by: str
+    rules_fired: list[RuleHitOut]
+    rule_score: int
+    ruleset_version: str
+    ml_score: float | None
+    model_version: str | None
+    shap_top5: list[dict[str, Any]] | None
+    latency_ms: float
+    stage_ms: dict[str, float]
+
+
+class RuleOut(BaseModel):
+    id: str
+    name: str
+    condition: str
+    action: Literal["DENY", "REVIEW"]
+    weight: int
+    reason: str
+
+
+class RulesetOut(BaseModel):
+    version: str
+    rules: list[RuleOut]
+    last_reload_error: str | None

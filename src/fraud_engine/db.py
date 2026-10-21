@@ -10,7 +10,18 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Index, Insert, Integer, String, Uuid, func, select
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Float,
+    Index,
+    Insert,
+    Integer,
+    String,
+    Uuid,
+    func,
+    select,
+)
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import (
@@ -65,13 +76,46 @@ class FeatureRecord(Base):
     vector: Mapped[dict] = mapped_column(JSONPayload)
 
 
+class DecisionRecord(Base):
+    """The audit log: what was decided for each event, by which rule or model, and how fast.
+
+    Together with the stored feature vector, the ruleset version and the model version, a row
+    is enough to recompute the decision and check it.
+    """
+
+    __tablename__ = "decisions"
+
+    event_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(16))
+    user_id: Mapped[str] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    final_decision: Mapped[str] = mapped_column(String(8))
+    # "rule:R001", "model" or "default": the stage that set the final decision.
+    decided_by: Mapped[str] = mapped_column(String(32))
+    rules_fired: Mapped[list] = mapped_column(JSONPayload)
+    rule_score: Mapped[int] = mapped_column(Integer)
+    ruleset_version: Mapped[str] = mapped_column(String(16))
+    ml_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    shap_top5: Mapped[list | None] = mapped_column(JSONPayload, nullable=True)
+    latency_ms: Mapped[float] = mapped_column(Float)
+    stage_ms: Mapped[dict] = mapped_column(JSONPayload)
+
+    __table_args__ = (
+        Index("ix_decisions_decision_time", "final_decision", "decided_at"),
+        Index("ix_decisions_time", "decided_at"),
+    )
+
+
 class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(url, pool_pre_ping=True)
         self.sessionmaker = async_sessionmaker(self.engine, expire_on_commit=False)
 
     async def create_tables(self) -> None:
-        # Fine for Milestone 1. Switch to Alembic migrations once the schema starts changing.
+        # create_all adds missing tables but never alters existing ones. That holds while each
+        # milestone only adds tables; switch to Alembic migrations before changing a column.
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 

@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     deadletter_stream: str = "events:deadletter"
     # Prefix for the feature engine's Redis keys.
     feature_prefix: str = "fe"
+    # Rules YAML; unset means the packaged default ruleset. Hot-reloaded when it changes.
+    rules_path: str | None = None
+    rules_reload_seconds: float = 2.0
 
 
 @lru_cache

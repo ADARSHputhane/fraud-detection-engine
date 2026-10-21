@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -17,6 +18,7 @@ from . import __version__
 from .api import router
 from .config import Settings, get_settings
 from .db import Database
+from .rules import RulesEngine
 from .scoring_api import router as scoring_router
 from .stream import EventStream
 
@@ -49,6 +51,10 @@ def create_app(settings: Settings | None = None, redis: Redis | None = None) -> 
         client = redis or Redis.from_url(settings.redis_url)
         app.state.db = db
         app.state.stream = EventStream(client, settings.stream_name, settings.stream_maxlen)
+        app.state.rules = RulesEngine(
+            Path(settings.rules_path) if settings.rules_path else None,
+            settings.rules_reload_seconds,
+        )
         try:
             yield
         finally:

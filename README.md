@@ -4,8 +4,9 @@ A real-time payment fraud detection engine built from scratch: event ingestion, 
 feature computation, an explainable rules engine and an ML risk scorer, aiming to return
 `ALLOW` / `REVIEW` / `DENY` for every payment in under 100 ms.
 
-> **Status:** Milestones 1–2 of 7 complete — event ingestion, a labelled synthetic traffic
-> generator, and a streaming feature engine. See the [roadmap](#roadmap).
+> **Status:** Milestones 1–3 of 7 complete — event ingestion, a labelled synthetic traffic
+> generator, a streaming feature engine and an explainable rules engine. See the
+> [roadmap](#roadmap).
 
 ![CI](https://github.com/ADARSHputhane/fraud-detection-engine/actions/workflows/ci.yml/badge.svg)
 
@@ -33,7 +34,7 @@ flowchart LR
     DASH -->|labels| ML
 
     classDef done fill:#d1fae5,stroke:#059669,color:#064e3b;
-    class API,PG,RS,FE done;
+    class API,PG,RS,FE,RE,D,AUD done;
 ```
 
 Green = built. The rest is on the roadmap below.
@@ -76,6 +77,40 @@ How it works:
 - **Out-of-order and skewed clocks are handled explicitly:** impossible travel uses the
   absolute time gap with a one-minute floor, first-seen times only ever move earlier, and a
   card's age can't go negative.
+
+## Milestone 3 results
+
+Rules live in [`default_rules.yml`](src/fraud_engine/rules/default_rules.yml): readable by
+an analyst, hot-reloaded when the file changes, and every hit carries a sentence explaining
+it, e.g. *"Card used 4540 km from its last payment, at 5988 km/h, from a new device or
+country"*.
+
+Measured on all 35,961 labelled events (1,807 fraudulent):
+
+| Ruleset | Recall | False-positive rate | DENY false-positive rate |
+|---|---|---|---|
+| Starter rules R001–R006 from the plan | 89.1% | 0.17% | 0.16% |
+| **After error analysis (R001–R010)** | **99.7%** | **0.17%** | **0.01%** |
+
+Target: ≥ 80% recall at < 2% false positives. Synthetic attacks are cleaner than real ones,
+so treat these as an upper bound; the ML model in Milestone 4 is what has to generalise.
+
+What the error analysis found:
+
+- **54 of the 57 false alarms were genuine cardholders paying at home minutes after a
+  fraudster used their card abroad.** Relative to the fraud, the genuine purchase looks like
+  impossible travel. The rule was right that the card is compromised, but denying the real
+  customer is the wrong call. Impossible travel is now split: to a *new* device or country is
+  DENY (R002); back to a familiar device and country is REVIEW (R007).
+- **The misses shared one fingerprint**: a device new to the account combined with a new
+  country and a foreign-issued card (R009), repeated declines (R008), or a cardholder-name
+  mismatch (R010).
+- `amount_zscore` is computed on log amounts, because spending is heavy-tailed; a threshold
+  of 5 on that scale missed most spend spikes, so R004 uses 3 or "≥ 5× typical spend".
+
+Safety: conditions are parsed with Python's `ast` and checked against an allow-list
+(comparisons, `and`/`or`/`not`, feature names, literals); nothing reaches `eval()`. Unknown
+feature names fail at load time, and a broken edit leaves the last good ruleset running.
 
 ## Design decisions
 
@@ -144,6 +179,8 @@ pytest
 | `POST` | `/events/batch` | Up to 1,000 mixed events, order preserved |
 | `GET` | `/events/{event_id}` | Fetch a stored event |
 | `GET` | `/features/{event_id}` | The feature vector the worker computed for an event |
+| `GET` | `/decisions/{event_id}` | Audit-log entry: decision, fired rules with reasons, timings |
+| `GET` | `/rules` | The ruleset currently in force |
 | `GET` | `/health` | Postgres and Redis status |
 
 ```bash
@@ -162,7 +199,7 @@ curl -X POST localhost:8000/events/payment -H 'content-type: application/json' -
 - [x] **1. Event ingestion & schema** — FastAPI, Postgres, Redis Streams, synthetic generator
 - [x] **2. Feature engine** — velocity counters (Redis sorted sets), amount z-scores,
       impossible travel, IP/BIN country mismatch, card age
-- [ ] **3. Rules engine** — YAML rules with human-readable reasons
+- [x] **3. Rules engine** — YAML rules with human-readable reasons
 - [ ] **4. ML risk scorer** — XGBoost + Isolation Forest, SHAP explanations
 - [ ] **5. Decision service & audit log** — <100 ms end to end, Prometheus metrics
 - [ ] **6. Analyst dashboard** — Next.js review queue with a label feedback loop
@@ -174,13 +211,16 @@ curl -X POST localhost:8000/events/payment -H 'content-type: application/json' -
 src/fraud_engine/
   schemas.py      event contracts + card-number detection
   api.py          ingest routes
-  scoring_api.py  read-side routes (features)
+  scoring_api.py  read-side routes (features, decisions, rules)
   db.py           Postgres tables
   stream.py       Redis Streams publisher and consumer-group reader
   features/       feature catalogue, Redis feature engine, geo, IP/BIN reference data
+  rules/          YAML ruleset, safe condition compiler, hot reload, evaluation
+  decision.py     combines stage outputs into ALLOW / REVIEW / DENY
+  offline.py      the live feature engine run over a file (rule evaluation, training)
   pipeline.py     per-event stages, timed
   worker.py       stream worker: batch, process in order, persist, acknowledge
-  cli.py          fraud-engine worker | bench-features
+  cli.py          fraud-engine worker | bench-features | build-features | evaluate-rules
   main.py         app factory
   generator/      personas, fraud patterns, CLI
 tests/            schema, API, generator, feature and worker tests

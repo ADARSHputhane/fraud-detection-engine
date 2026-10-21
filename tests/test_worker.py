@@ -99,3 +99,34 @@ async def test_features_are_returned_in_catalogue_order(client, app, redis, paym
     await worker.run_once()
     body = (await client.get(f"/features/{event['event_id']}")).json()
     assert tuple(body["features"]) == FEATURE_NAMES
+
+
+async def test_card_testing_is_denied_with_reasons_in_the_audit_log(client, app, redis, instrument):
+    cards = [
+        instrument(card_id=f"tok_stolen{i:04d}", user_id="usr_mule01", device_id="dev_farm01")
+        for i in range(3)
+    ]
+    await client.post("/events/batch", json={"events": cards})
+    worker = make_worker(app, redis)
+    await worker.consumer.ensure_group()
+    await worker.run_once()
+
+    first = (await client.get(f"/decisions/{cards[0]['event_id']}")).json()
+    third = (await client.get(f"/decisions/{cards[2]['event_id']}")).json()
+    assert first["final_decision"] == "ALLOW"
+    assert third["final_decision"] == "DENY" and third["decided_by"] == "rule:R001"
+    assert third["rules_fired"][0]["reason"] == "3 cards added to this account within 3 hours"
+    assert set(third["stage_ms"]) >= {"features", "rules"}
+    assert third["ruleset_version"] == app.state.rules.ruleset.version
+
+
+async def test_rules_endpoint_lists_the_active_ruleset(client):
+    body = (await client.get("/rules")).json()
+    assert [r["id"] for r in body["rules"]][:3] == ["R001", "R002", "R003"]
+    assert body["last_reload_error"] is None
+
+
+async def test_decision_404_before_processing(client):
+    from uuid import uuid4
+
+    assert (await client.get(f"/decisions/{uuid4()}")).status_code == 404

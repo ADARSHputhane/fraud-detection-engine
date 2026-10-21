@@ -1,0 +1,89 @@
+# Deterministic fraud rules. They run before the ML model.
+#
+#   DENY    blocks the payment and always overrides the model
+#   REVIEW  sends the event to the analyst queue (the model can still escalate to DENY)
+#
+# condition: a boolean expression over feature names (see docs/signals.md), using
+#            comparisons, and / or / not, and literals. A missing value never matches.
+# weight:    contribution to the 0-100 rule score shown to analysts
+# reason:    shown to analysts; {feature} placeholders are filled in, {x:.0f} formats numbers
+#
+# This file is hot-reloaded. An invalid edit is logged and the previous rules keep running.
+
+rules:
+  - id: R001
+    name: Card testing
+    condition: cards_added_3h >= 3
+    action: DENY
+    weight: 90
+    reason: "{cards_added_3h} cards added to this account within 3 hours"
+
+  - id: R002
+    name: Impossible travel to a new device or country
+    condition: impossible_travel and (new_device or new_country)
+    action: DENY
+    weight: 90
+    reason: "Card used {distance_from_last_km:.0f} km from its last payment, at {travel_speed_kmh:.0f} km/h, from a new device or country"
+
+  - id: R003
+    name: CVV brute force
+    condition: card_failed_attempts_1h >= 5 and payment_approved
+    action: DENY
+    weight: 95
+    reason: "Approved after {card_failed_attempts_1h} declined attempts on this card within an hour"
+
+  - id: R004
+    name: Spend spike on a new card
+    # new_card_high_amount: card under 24 h old and at least 5x the user's typical payment.
+    # amount_zscore is on a log scale (spending is heavy-tailed), so 3 is already a big jump.
+    condition: new_card_high_amount or (amount_zscore > 3 and card_age_hours < 24)
+    action: REVIEW
+    weight: 60
+    reason: "{amount_vs_typical:.0f}x the user's typical spend on a card added {card_age_hours:.1f} h ago"
+
+  - id: R005
+    name: Many cards on one device
+    condition: device_distinct_cards_24h >= 4
+    action: REVIEW
+    weight: 50
+    reason: "{device_distinct_cards_24h} different cards used on this device within 24 hours"
+
+  - id: R006
+    name: Hosting IP on a new device
+    condition: datacenter_ip and new_device
+    action: REVIEW
+    weight: 50
+    reason: "Datacenter or VPN IP on a device first seen {device_age_hours:.1f} h ago"
+
+  # Added after error analysis of the starter rules (see docs/signals.md).
+
+  - id: R007
+    name: Impossible travel back to familiar ground
+    # The *other* side of a cloned card: the genuine cardholder paying at home, on their own
+    # device, minutes after the clone was used abroad. Don't block them; send it to an
+    # analyst, because the card is compromised either way.
+    condition: impossible_travel and not new_device and not new_country
+    action: REVIEW
+    weight: 40
+    reason: "Impossible travel ({travel_speed_kmh:.0f} km/h) but from a known device and country: likely the genuine cardholder on a compromised card"
+
+  - id: R008
+    name: Repeated declines from a new device
+    condition: card_failed_attempts_1h >= 3 and new_device
+    action: REVIEW
+    weight: 60
+    reason: "{card_failed_attempts_1h} declined attempts on this card within an hour, from a device first seen {device_age_hours:.1f} h ago"
+
+  - id: R009
+    name: New country, new device, foreign card
+    condition: new_country and new_device and geo_bin_country_mismatch
+    action: REVIEW
+    weight: 55
+    reason: "Used in a country new to this account, from a new device, outside the card's issuing country"
+
+  - id: R010
+    name: Name mismatch on a new device
+    condition: card_name_mismatch and new_device
+    action: REVIEW
+    weight: 45
+    reason: "Cardholder name doesn't match the account holder, and the device was first seen {device_age_hours:.1f} h ago"

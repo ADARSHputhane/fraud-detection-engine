@@ -2,6 +2,8 @@
 
 fraud-engine worker                  consume the stream and score events
 fraud-engine bench-features          time feature computation against a real Redis
+fraud-engine build-features          compute feature vectors for a file of events (offline)
+fraud-engine evaluate-rules          recall / false-positive rate of a ruleset on labelled data
 """
 
 from __future__ import annotations
@@ -21,8 +23,10 @@ from redis.asyncio import Redis
 from .config import get_settings
 from .db import Database
 from .features import FeatureEngine
-from .jsonl import read_jsonl
+from .jsonl import read_jsonl, write_jsonl
+from .offline import build_features, join_labels
 from .pipeline import Pipeline
+from .rules import RulesEngine, evaluate_ruleset
 from .stream import EventConsumer
 from .worker import Worker
 
@@ -47,7 +51,13 @@ async def _worker(args: argparse.Namespace) -> int:
         consumer=EventConsumer(
             redis, settings.stream_name, settings.consumer_group, settings.consumer_name
         ),
-        pipeline=Pipeline(FeatureEngine(redis, prefix=settings.feature_prefix)),
+        pipeline=Pipeline(
+            FeatureEngine(redis, prefix=settings.feature_prefix),
+            RulesEngine(
+                Path(settings.rules_path) if settings.rules_path else None,
+                settings.rules_reload_seconds,
+            ),
+        ),
         deadletter_stream=settings.deadletter_stream,
         batch_size=settings.worker_batch_size,
         block_ms=settings.worker_block_ms,
@@ -99,6 +109,26 @@ async def _bench_features(args: argparse.Namespace) -> int:
     return 0 if report["feature_ms"]["p95"] < 10 else 1
 
 
+async def _build_features(args: argparse.Namespace) -> int:
+    events = read_jsonl(Path(args.events))
+    redis = Redis.from_url(args.redis_url or get_settings().redis_url)
+    started = perf_counter()
+    try:
+        rows = await build_features(events, redis)
+    finally:
+        await redis.aclose()
+    write_jsonl(Path(args.out), rows)
+    print(f"{len(rows):,} feature vectors -> {args.out} in {perf_counter() - started:.1f} s")
+    return 0
+
+
+async def _evaluate_rules(args: argparse.Namespace) -> int:
+    ruleset = RulesEngine(Path(args.rules) if args.rules else None).ruleset
+    labelled = join_labels(read_jsonl(Path(args.features)), read_jsonl(Path(args.labels)))
+    print(json.dumps(evaluate_ruleset(ruleset, labelled), indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(
@@ -117,6 +147,18 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--limit", type=int, default=10_000)
     b.add_argument("--redis-url", default=None, help="defaults to REDIS_URL")
     b.set_defaults(func=_bench_features)
+
+    f = sub.add_parser("build-features", help="compute feature vectors for a file of events")
+    f.add_argument("--events", default="data/events.jsonl")
+    f.add_argument("--out", default="data/features.jsonl")
+    f.add_argument("--redis-url", default=None, help="defaults to REDIS_URL")
+    f.set_defaults(func=_build_features)
+
+    e = sub.add_parser("evaluate-rules", help="score a ruleset against labelled events")
+    e.add_argument("--features", default="data/features.jsonl")
+    e.add_argument("--labels", default="data/labels.jsonl")
+    e.add_argument("--rules", default=None, help="rules YAML (default: the packaged ruleset)")
+    e.set_defaults(func=_evaluate_rules)
 
     args = parser.parse_args(argv)
     return asyncio.run(args.func(args))
